@@ -3,6 +3,7 @@ import json
 import shutil
 from typing import List, Dict, Optional, Tuple
 from .api_handler import APIHandler
+from .report_generator import ReportGenerator
 
 class BookManager:
     """管理书籍和章节处理流程"""
@@ -179,6 +180,34 @@ class BookManager:
         return self.api_handler.analyze_chapters(
             book_path, chapters, status_callback, log_callback
         )
+    
+    def generate_book_report(self, book_path: str,
+                             status_callback: Optional[callable] = None,
+                             log_callback: Optional[callable] = None) -> Optional[str]:
+        """
+        生成书籍的Word报告。
+        
+        Args:
+            book_path: 书籍的路径。
+            status_callback: 状态更新回调。
+            log_callback: 日志回调。
+            
+        Returns:
+            生成的报告文件路径，如果失败则返回None。
+        """
+        metadata = self.get_book_metadata(book_path)
+        if not metadata:
+            if log_callback:
+                log_callback(f"无法获取书籍元数据: {book_path}")
+            return None
+        
+        book_title = metadata.get('title', os.path.basename(book_path))
+        chapters = self.get_book_chapters(book_path) # 获取章节信息
+        
+        # 创建ReportGenerator实例
+        report_generator = ReportGenerator(book_path, log_callback)
+        
+        return report_generator.generate_report(book_title, chapters)
     
     def _get_current_time(self) -> str:
         """获取当前时间字符串"""

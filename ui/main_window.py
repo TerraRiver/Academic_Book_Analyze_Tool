@@ -88,6 +88,35 @@ class LLMAnalysisWorker(QThread):
             self.finished.emit(False)
 
 
+class ReportGenerationWorker(QThread):
+    """Word报告生成工作线程"""
+    finished = Signal(bool, str)  # success, report_path
+    log_message = Signal(str)
+    
+    def __init__(self, book_path):
+        super().__init__()
+        self.book_path = book_path
+        self.book_manager = BookManager()
+    
+    def run(self):
+        """在后台线程中执行Word报告生成"""
+        try:
+            def log_callback(message):
+                self.log_message.emit(message)
+            
+            report_path = self.book_manager.generate_book_report(
+                self.book_path,
+                log_callback=log_callback
+            )
+            
+            success = report_path is not None
+            self.finished.emit(success, report_path or "")
+            
+        except Exception as e:
+            self.log_message.emit(f"Word报告生成过程中发生错误：{str(e)}")
+            self.finished.emit(False, "")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -98,6 +127,7 @@ class MainWindow(QMainWindow):
         self.current_book_path = None
         self.mineru_worker = None
         self.llm_worker = None
+        self.report_worker = None
 
         # 创建菜单栏
         self.create_menu_bar()
@@ -177,6 +207,12 @@ class MainWindow(QMainWindow):
         self.llm_analyze_button.clicked.connect(self.analyze_with_llm)
         self.llm_analyze_button.setEnabled(False)
         process_layout.addWidget(self.llm_analyze_button)
+        
+        # 生成Word报告按钮
+        self.generate_report_button = QPushButton("生成Word报告")
+        self.generate_report_button.clicked.connect(self.generate_word_report)
+        self.generate_report_button.setEnabled(False)
+        process_layout.addWidget(self.generate_report_button)
         
         right_layout.addLayout(process_layout)
 
@@ -336,6 +372,75 @@ class MainWindow(QMainWindow):
         if self.llm_worker:
             self.llm_worker.deleteLater()
             self.llm_worker = None
+
+    def generate_word_report(self):
+        """生成Word报告"""
+        if not self.current_book_path:
+            QMessageBox.warning(self, "错误", "请先选择一本书")
+            return
+
+        # 检查是否已完成LLM分析
+        llm_result_dir = os.path.join(self.current_book_path, "LLM_result")
+        if not os.path.exists(llm_result_dir):
+            QMessageBox.warning(self, "错误", "请先完成LLM分析")
+            return
+
+        # 确认操作
+        reply = QMessageBox.question(self, "确认生成", 
+                                   f"确定要生成Word报告吗？\n这将整合所有LLM分析结果。",
+                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # 禁用按钮，防止重复点击
+        self.generate_report_button.setEnabled(False)
+        self.generate_report_button.setText("生成中...")
+
+        # 创建并启动工作线程
+        self.report_worker = ReportGenerationWorker(self.current_book_path)
+        self.report_worker.log_message.connect(self.log_message)
+        self.report_worker.finished.connect(self.on_report_generation_finished)
+        self.report_worker.start()
+
+    def on_report_generation_finished(self, success, report_path):
+        """Word报告生成完成的回调"""
+        # 恢复按钮状态
+        self.generate_report_button.setEnabled(True)
+        self.generate_report_button.setText("生成Word报告")
+
+        if success:
+            # 更新元数据状态
+            metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
+            metadata["status"] = "已完成Word报告生成"
+            self.book_manager.save_book_metadata(self.current_book_path, metadata)
+            
+            # 刷新书籍列表显示状态
+            self.load_books()
+            
+            # 显示成功消息，并询问是否打开报告
+            reply = QMessageBox.question(self, "成功", 
+                                       f"Word报告生成成功！\n报告路径: {report_path}\n\n是否现在打开报告？",
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes:
+                try:
+                    import os
+                    os.startfile(report_path)  # Windows
+                except:
+                    try:
+                        import subprocess
+                        subprocess.run(['open', report_path])  # macOS
+                    except:
+                        try:
+                            subprocess.run(['xdg-open', report_path])  # Linux
+                        except:
+                            QMessageBox.information(self, "提示", f"无法自动打开文件，请手动打开:\n{report_path}")
+        else:
+            QMessageBox.warning(self, "错误", "Word报告生成失败，请查看日志了解详情")
+
+        # 清理工作线程
+        if self.report_worker:
+            self.report_worker.deleteLater()
+            self.report_worker = None
 
     def create_menu_bar(self):
         """创建菜单栏"""
@@ -801,6 +906,11 @@ class MainWindow(QMainWindow):
         chapters_markdown_dir = os.path.join(self.current_book_path, "chapters_markdown")
         llm_ready = os.path.exists(chapters_markdown_dir) and len(os.listdir(chapters_markdown_dir)) > 0
         self.llm_analyze_button.setEnabled(llm_ready)
+
+        # 生成Word报告按钮状态
+        llm_result_dir = os.path.join(self.current_book_path, "LLM_result")
+        report_ready = os.path.exists(llm_result_dir) and len(os.listdir(llm_result_dir)) > 0
+        self.generate_report_button.setEnabled(report_ready)
 
     def log_message(self, message):
         """添加日志消息"""

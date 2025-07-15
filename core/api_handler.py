@@ -34,7 +34,7 @@ class ConfigManager:
             'enable_ocr': section.getboolean('enable_ocr', True),
             'enable_formula': section.getboolean('enable_formula', True),
             'enable_table': section.getboolean('enable_table', True),
-            'language': section.get('language', 'zh'),
+            'language': section.get('language', 'ch'),
             'poll_interval': section.getint('poll_interval', 10),
             'max_attempts': section.getint('max_attempts', 60)
         }
@@ -151,7 +151,7 @@ class DeepSeekAPI:
                 self.chat_url,
                 headers=self.headers,
                 json=payload,
-                timeout=60
+                timeout=120
             )
             response.raise_for_status()
             return response.json()

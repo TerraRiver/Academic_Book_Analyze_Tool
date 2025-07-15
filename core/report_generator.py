@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import configparser
 from docx import Document
 from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -19,9 +20,20 @@ class ReportGenerator:
     def __init__(self, book_path: str, log_callback: Optional[Callable] = None):
         self.book_path = book_path
         self.llm_result_dir = os.path.join(book_path, "LLM_result")
-        self.output_dir = book_path # 报告直接输出到书籍根目录
         self.log_callback = log_callback
         self.document = Document()
+
+        # 读取配置文件以确定输出目录
+        config = configparser.ConfigParser()
+        config.read('config.ini', encoding='utf-8')
+        custom_output_path = config.get('General', 'report_output_path', fallback=None)
+        
+        if custom_output_path and os.path.isdir(custom_output_path):
+            self.output_dir = custom_output_path
+            self._log(f"报告将保存到自定义目录: {self.output_dir}")
+        else:
+            self.output_dir = book_path # 默认输出到书籍根目录
+        
         self._setup_document_defaults()
 
     def _log(self, message: str):

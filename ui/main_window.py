@@ -121,6 +121,73 @@ class ReportGenerationWorker(QThread):
             self.finished.emit(False, "")
 
 
+class FullProcessWorker(QThread):
+    """完整处理流程工作线程"""
+    finished = Signal(bool, str)  # success, final_message
+    log_message = Signal(str)
+    progress_update = Signal(str, int) # step_name, percentage
+
+    def __init__(self, book_path, chapters):
+        super().__init__()
+        self.book_path = book_path
+        self.chapters = chapters
+        self.book_manager = BookManager()
+        self.api_handler = APIHandler()
+
+    def run(self):
+        """在后台线程中按顺序执行完整处理流程"""
+        try:
+            # 0. Helper for logging
+            def log_callback(message):
+                self.log_message.emit(message)
+
+            # 1. 章节切分
+            self.progress_update.emit("章节切分", 10)
+            log_callback("开始章节切分...")
+            original_pdf_path = os.path.join(self.book_path, "original.pdf")
+            chapters_pdf_dir = os.path.join(self.book_path, "chapters_pdf")
+            from core.pdf_processor import split_pdf_by_chapters
+            success, msg = split_pdf_by_chapters(original_pdf_path, self.chapters, chapters_pdf_dir)
+            if not success:
+                raise Exception(f"章节切分失败: {msg}")
+            log_callback("章节切分完成。")
+            self.progress_update.emit("章节切分", 25)
+
+            # 2. MinerU解析
+            self.progress_update.emit("MinerU解析", 30)
+            log_callback("开始MinerU解析...")
+            success = self.api_handler.process_book_chapters(self.book_path, self.chapters, log_callback=log_callback)
+            if not success:
+                raise Exception("MinerU解析失败。")
+            log_callback("MinerU解析完成。")
+            self.progress_update.emit("MinerU解析", 50)
+
+            # 3. LLM分析
+            self.progress_update.emit("LLM分析", 55)
+            log_callback("开始LLM分析...")
+            success = self.api_handler.analyze_chapters(self.book_path, self.chapters, log_callback=log_callback)
+            if not success:
+                raise Exception("LLM分析失败。")
+            log_callback("LLM分析完成。")
+            self.progress_update.emit("LLM分析", 75)
+
+            # 4. 生成Word报告
+            self.progress_update.emit("生成Word报告", 80)
+            log_callback("开始生成Word报告...")
+            report_path = self.book_manager.generate_book_report(self.book_path, log_callback=log_callback)
+            if not report_path:
+                raise Exception("生成Word报告失败。")
+            log_callback(f"Word报告生成完成！路径：{report_path}")
+            self.progress_update.emit("处理完成", 100)
+
+            self.finished.emit(True, f"处理完成！报告已生成于：\n{report_path}")
+
+        except Exception as e:
+            error_message = f"处理流程中发生错误：{str(e)}"
+            self.log_message.emit(error_message)
+            self.finished.emit(False, error_message)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -132,6 +199,7 @@ class MainWindow(QMainWindow):
         self.mineru_worker = None
         self.llm_worker = None
         self.report_worker = None
+        self.full_process_worker = None
 
         # 创建菜单栏
         self.create_menu_bar()
@@ -166,6 +234,9 @@ class MainWindow(QMainWindow):
         self.book_group_combo = QComboBox()
         self.book_group_combo.setObjectName("book_group_combo")
         self.book_group_combo.currentIndexChanged.connect(self.on_book_group_selected)
+        # 添加右键菜单功能
+        self.book_group_combo.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.book_group_combo.customContextMenuRequested.connect(self.show_book_group_context_menu)
         left_layout.addWidget(self.book_group_combo)
 
         left_layout.addWidget(QLabel("书籍列表"))
@@ -184,6 +255,14 @@ class MainWindow(QMainWindow):
         # 设置行高
         self.book_table_widget.verticalHeader().setDefaultSectionSize(50)
         left_layout.addWidget(self.book_table_widget)
+
+        # 上传按钮
+        self.upload_book_button = QPushButton("上传书籍")
+        self.upload_book_button.setIcon(QIcon("assets/icons/upload.png"))
+        self.upload_book_button.clicked.connect(self.upload_book)
+        self.upload_book_button.setEnabled(False) # 初始禁用
+        left_layout.addWidget(self.upload_book_button)
+
         main_layout.addWidget(left_panel, 2)
 
         # --- 中央内容区域 (使用 QStackedWidget 管理不同视图) ---
@@ -210,28 +289,6 @@ class MainWindow(QMainWindow):
         welcome_layout.addWidget(welcome_label)
         
         self.central_stacked_widget.addWidget(welcome_page)
-
-        # 2. 书籍组选择页面 (显示上传按钮)
-        self.book_group_page = QWidget()
-        book_group_layout = QVBoxLayout(self.book_group_page)
-        book_group_layout.setContentsMargins(10, 10, 10, 10)
-        book_group_layout.setSpacing(10)
-        book_group_layout.setAlignment(Qt.AlignCenter)
-        
-        # 书籍组信息显示
-        self.group_info_label = QLabel("请选择书籍组进行上传操作")
-        self.group_info_label.setAlignment(Qt.AlignCenter)
-        self.group_info_label.setFont(QFont("Arial", 14))
-        book_group_layout.addWidget(self.group_info_label)
-        
-        # 上传按钮
-        self.upload_book_button = QPushButton("上传书籍到此书籍组")
-        self.upload_book_button.setIcon(QIcon("assets/icons/upload.png"))
-        self.upload_book_button.clicked.connect(self.upload_book)
-        self.upload_book_button.setEnabled(False)
-        book_group_layout.addWidget(self.upload_book_button)
-        
-        self.central_stacked_widget.addWidget(self.book_group_page)
 
         # 3. 书籍详情/章节管理页面
         self.book_detail_page = QWidget()
@@ -270,39 +327,13 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.save_chapters_button)
         book_detail_layout.addLayout(button_layout)
 
-        # 添加章节切分按钮
-        split_layout = QHBoxLayout()
-        self.split_chapters_button = QPushButton("章节切分")
-        self.split_chapters_button.setIcon(QIcon("assets/icons/split.png"))
-        self.split_chapters_button.clicked.connect(self.split_chapters)
-        self.split_chapters_button.setEnabled(False)
-        split_layout.addWidget(self.split_chapters_button)
-        book_detail_layout.addLayout(split_layout)
-
-        # 添加处理按钮
+        # 添加“开始处理”按钮
         process_layout = QHBoxLayout()
-        
-        # MinerU处理按钮
-        self.mineru_process_button = QPushButton("MinerU解析")
-        self.mineru_process_button.setIcon(QIcon("assets/icons/process.png"))
-        self.mineru_process_button.clicked.connect(self.process_with_mineru)
-        self.mineru_process_button.setEnabled(False)
-        process_layout.addWidget(self.mineru_process_button)
-        
-        # LLM分析按钮
-        self.llm_analyze_button = QPushButton("LLM分析")
-        self.llm_analyze_button.setIcon(QIcon("assets/icons/analyze.png"))
-        self.llm_analyze_button.clicked.connect(self.analyze_with_llm)
-        self.llm_analyze_button.setEnabled(False)
-        process_layout.addWidget(self.llm_analyze_button)
-        
-        # 生成Word报告按钮
-        self.generate_report_button = QPushButton("生成Word报告")
-        self.generate_report_button.setIcon(QIcon("assets/icons/report.png"))
-        self.generate_report_button.clicked.connect(self.generate_word_report)
-        self.generate_report_button.setEnabled(False)
-        process_layout.addWidget(self.generate_report_button)
-        
+        self.start_processing_button = QPushButton("开始处理")
+        self.start_processing_button.setIcon(QIcon("assets/icons/start.png")) # 假设有这个图标
+        self.start_processing_button.clicked.connect(self.start_full_process)
+        self.start_processing_button.setEnabled(False)
+        process_layout.addWidget(self.start_processing_button)
         book_detail_layout.addLayout(process_layout)
         self.central_stacked_widget.addWidget(self.book_detail_page)
 
@@ -329,6 +360,82 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.log_panel, 2)
 
         self.load_books()
+
+    def start_full_process(self):
+        """开始完整的处理流程"""
+        if not self.current_book_path:
+            QMessageBox.warning(self, "错误", "请先选择一本书")
+            return
+
+        # 确认操作
+        reply = QMessageBox.question(self, "确认处理", 
+                                   f"确定要开始完整的处理流程吗？\n这将依次执行：\n1. 章节切分\n2. MinerU解析\n3. LLM分析\n4. 生成Word报告\n\n此过程可能需要很长时间。",
+                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # 禁用按钮
+        self.start_processing_button.setEnabled(False)
+        self.start_processing_button.setText("处理中...")
+
+        # 获取章节信息
+        chapters = []
+        for i in range(self.chapter_table.rowCount()):
+            try:
+                title = self.chapter_table.item(i, 0).text()
+                start_page = int(self.chapter_table.item(i, 1).text())
+                end_page = int(self.chapter_table.item(i, 2).text())
+                chapters.append({"title": title, "start_page": start_page, "end_page": end_page})
+            except (ValueError, AttributeError):
+                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的页码或标题无效，请检查。")
+                self.start_processing_button.setEnabled(True)
+                self.start_processing_button.setText("开始处理")
+                return
+
+        # 创建并启动工作线程
+        self.full_process_worker = FullProcessWorker(self.current_book_path, chapters)
+        self.full_process_worker.log_message.connect(self.log_message)
+        self.full_process_worker.progress_update.connect(self.update_progress)
+        self.full_process_worker.finished.connect(self.on_full_process_finished)
+        self.full_process_worker.start()
+
+    def update_progress(self, step_name, percentage):
+        """更新处理进度"""
+        self.start_processing_button.setText(f"{step_name} ({percentage}%)")
+        self.log_message(f"进度: {step_name} ({percentage}%)")
+
+    def on_full_process_finished(self, success, message):
+        """完整处理流程完成的回调"""
+        self.start_processing_button.setEnabled(True)
+        self.start_processing_button.setText("开始处理")
+        
+        path_to_reselect = self.current_book_path
+
+        if success:
+            # 更新元数据状态为“处理完成”
+            if self.current_book_path:
+                metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
+                metadata["status"] = "处理完成"
+                self.book_manager.save_book_metadata(self.current_book_path, metadata)
+            QMessageBox.information(self, "成功", message)
+        else:
+            QMessageBox.critical(self, "处理失败", message)
+        
+        # 刷新状态并重新选中书籍
+        self.load_books()
+        if path_to_reselect:
+            for i in range(self.book_table_widget.rowCount()):
+                item = self.book_table_widget.item(i, 1)
+                if item and item.data(Qt.UserRole) == path_to_reselect:
+                    self.book_table_widget.selectRow(i)
+                    break
+        
+        self.update_button_states()
+
+        # 清理工作线程
+        if self.full_process_worker:
+            self.full_process_worker.deleteLater()
+            self.full_process_worker = None
 
     def setup_ui_styles(self):
         """设置UI的整体样式"""
@@ -582,158 +689,6 @@ class MainWindow(QMainWindow):
             }
         """)
 
-    def process_with_mineru(self):
-        """使用MinerU处理章节"""
-        if not self.current_book_path:
-            QMessageBox.warning(self, "错误", "请先选择一本书")
-            return
-
-        # 检查是否已完成章节切分
-        chapters_pdf_dir = os.path.join(self.current_book_path, "chapters_pdf")
-        if not os.path.exists(chapters_pdf_dir):
-            QMessageBox.warning(self, "错误", "请先完成章节切分")
-            return
-
-        # 确认操作
-        reply = QMessageBox.question(self, "确认处理", 
-                                   f"确定要使用MinerU处理章节PDF吗？\n这可能会花费较长时间。",
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-
-        # 禁用按钮，防止重复点击
-        self.mineru_process_button.setEnabled(False)
-        self.mineru_process_button.setText("处理中...")
-
-        # 获取章节信息
-        chapters = []
-        for i in range(self.chapter_table.rowCount()):
-            try:
-                title = self.chapter_table.item(i, 0).text()
-                chapters.append({"title": title})
-            except AttributeError:
-                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的章节标题无效，请检查。")
-                return
-
-        # 创建并启动工作线程
-        self.mineru_worker = MinerUWorker(self.current_book_path, chapters)
-        self.mineru_worker.log_message.connect(self.log_message)
-        self.mineru_worker.finished.connect(self.on_mineru_processing_finished)
-        self.mineru_worker.start()
-
-    def on_mineru_processing_finished(self, success):
-        """MinerU处理完成的回调"""
-        # 恢复按钮状态
-        self.mineru_process_button.setEnabled(True)
-        self.mineru_process_button.setText("MinerU解析")
-
-        if success:
-            # 更新元数据状态
-            metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
-            metadata["status"] = "已完成MinerU解析"
-            self.book_manager.save_book_metadata(self.current_book_path, metadata)
-            
-            # 刷新书籍列表显示状态
-            self.load_books()
-            
-            QMessageBox.information(self, "成功", "MinerU处理完成！")
-        else:
-            QMessageBox.warning(self, "错误", "MinerU处理失败，请查看日志了解详情")
-
-        # 清理工作线程
-        if self.mineru_worker:
-            self.mineru_worker.deleteLater()
-            self.mineru_worker = None
-
-    def analyze_with_llm(self):
-        """使用LLM分析章节"""
-        if not self.current_book_path:
-            QMessageBox.warning(self, "错误", "请先选择一本书")
-            return
-
-        # 检查是否已完成MinerU解析
-        chapters_markdown_dir = os.path.join(self.current_book_path, "chapters_markdown")
-        if not os.path.exists(chapters_markdown_dir):
-            QMessageBox.warning(self, "错误", "请先完成MinerU解析")
-            return
-
-        # 确认操作
-        reply = QMessageBox.question(self, "确认分析", 
-                                   f"确定要使用LLM分析章节内容吗？\n这可能会花费较长时间。",
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-
-        # 禁用按钮，防止重复点击
-        self.llm_analyze_button.setEnabled(False)
-        self.llm_analyze_button.setText("分析中...")
-
-        # 获取章节信息
-        chapters = []
-        for i in range(self.chapter_table.rowCount()):
-            try:
-                title = self.chapter_table.item(i, 0).text()
-                chapters.append({"title": title})
-            except AttributeError:
-                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的章节标题无效，请检查。")
-                return
-
-        # 创建并启动工作线程
-        self.llm_worker = LLMAnalysisWorker(self.current_book_path, chapters)
-        self.llm_worker.log_message.connect(self.log_message)
-        self.llm_worker.finished.connect(self.on_llm_analysis_finished)
-        self.llm_worker.start()
-
-    def on_llm_analysis_finished(self, success):
-        """LLM分析完成的回调"""
-        self.llm_analyze_button.setEnabled(True)
-        self.llm_analyze_button.setText("LLM分析")
-
-        if success:
-            QMessageBox.information(self, "成功", "LLM分析完成！")
-        else:
-            QMessageBox.warning(self, "错误", "LLM分析失败，请查看日志了解详情")
-
-        if self.llm_worker:
-            self.llm_worker.deleteLater()
-            self.llm_worker = None
-
-    def generate_word_report(self):
-        """生成Word报告"""
-        if not self.current_book_path:
-            QMessageBox.warning(self, "错误", "请先选择一本书")
-            return
-
-        # 确认操作
-        reply = QMessageBox.question(self, "确认生成报告", 
-                                   f"确定要生成Word报告吗？",
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-
-        # 禁用按钮，防止重复点击
-        self.generate_report_button.setEnabled(False)
-        self.generate_report_button.setText("生成中...")
-
-        # 创建并启动工作线程
-        self.report_worker = ReportGenerationWorker(self.current_book_path)
-        self.report_worker.log_message.connect(self.log_message)
-        self.report_worker.finished.connect(self.on_report_generation_finished)
-        self.report_worker.start()
-
-    def on_report_generation_finished(self, success, report_path):
-        """报告生成完成的回调"""
-        self.generate_report_button.setEnabled(True)
-        self.generate_report_button.setText("生成Word报告")
-
-        if success:
-            QMessageBox.information(self, "成功", f"报告生成完成！路径：{report_path}")
-        else:
-            QMessageBox.warning(self, "错误", "报告生成失败，请查看日志了解详情")
-
-        if self.report_worker:
-            self.report_worker.deleteLater()
-            self.report_worker = None
 
     def log_message(self, message):
         """记录日志信息"""
@@ -810,28 +765,62 @@ class MainWindow(QMainWindow):
         # 在更新期间禁用信号，防止不必要的操作
         self.book_group_combo.blockSignals(True)
         
-        # 加载书籍组到下拉框
-        book_groups = self.book_manager.scan_book_groups()
+        # 记录当前选择
         current_group = self.book_group_combo.currentText()
         
+        # 加载书籍组到下拉框
+        book_groups = self.book_manager.scan_book_groups()
+        
         self.book_group_combo.clear()
-        self.book_group_combo.addItems(book_groups)
+        self.book_group_combo.addItem("未选择")
+        if book_groups:
+            self.book_group_combo.addItems(book_groups)
         
         # 尝试恢复之前选择的书籍组
         if current_group and current_group in book_groups:
-            index = book_groups.index(current_group)
-            self.book_group_combo.setCurrentIndex(index)
-        elif book_groups:
-            self.book_group_combo.setCurrentIndex(0)
+            self.book_group_combo.setCurrentText(current_group)
+        else:
+            self.book_group_combo.setCurrentIndex(0) # Default to "未选择"
         
         # 重新启用信号
         self.book_group_combo.blockSignals(False)
         
-        # 更新书籍列表
-        if book_groups:
-            self.update_book_list(self.book_group_combo.currentText())
-        else:
-            self.book_table_widget.setRowCount(0)
+        # 更新UI状态
+        self.on_book_group_selected()
+
+    def show_book_group_context_menu(self, position):
+        """显示书籍组下拉框的上下文菜单"""
+        menu = QMenu()
+        delete_group_action = menu.addAction("删除此书籍组")
+        action = menu.exec(self.book_group_combo.mapToGlobal(position))
+        
+        if action == delete_group_action:
+            self.delete_selected_book_group()
+
+    def delete_selected_book_group(self):
+        """删除当前选中的书籍组"""
+        selected_group = self.book_group_combo.currentText()
+        if not selected_group:
+            QMessageBox.warning(self, "错误", "没有选中的书籍组")
+            return
+
+        reply = QMessageBox.question(self, "确认删除", 
+                                     f"确定要删除书籍组 '{selected_group}' 吗？\n这将永久删除该书籍组及其包含的所有书籍和数据！",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            success, message = self.book_manager.delete_book_group(selected_group)
+            if success:
+                self.log_message(f"书籍组 '{selected_group}' 已被删除。")
+                QMessageBox.information(self, "成功", f"书籍组 '{selected_group}' 已删除。")
+                # 刷新整个书籍列表
+                self.load_books()
+                # 检查是否还有书籍组，如果没有，则切换到欢迎页面
+                if self.book_group_combo.count() == 0:
+                    self.central_stacked_widget.setCurrentIndex(0)
+            else:
+                self.log_message(f"删除书籍组 '{selected_group}' 失败: {message}")
+                QMessageBox.warning(self, "删除失败", message)
 
     def create_book_group(self):
         """创建书籍组"""
@@ -840,6 +829,7 @@ class MainWindow(QMainWindow):
             success, message = self.book_manager.create_book_group(group_name)
             if success:
                 self.load_books()
+                self.book_group_combo.setCurrentText(group_name)
                 QMessageBox.information(self, "成功", "书籍组创建成功")
             else:
                 QMessageBox.warning(self, "错误", message)
@@ -847,15 +837,17 @@ class MainWindow(QMainWindow):
     def on_book_group_selected(self):
         """书籍组选择变化时的处理"""
         selected_group = self.book_group_combo.currentText()
-        if selected_group:
+        if selected_group and selected_group != "未选择":
             self.update_book_list(selected_group)
-            # 启用上传按钮并更新信息
             self.upload_book_button.setEnabled(True)
-            self.upload_book_button.setText(f"上传书籍到 {selected_group}")
-            self.group_info_label.setText(f"已选择书籍组: {selected_group}\n\n点击下方按钮上传PDF文件到此书籍组")
-            self.central_stacked_widget.setCurrentIndex(1)  # 显示书籍组页面
+            self.upload_book_button.setText(f"上传到 {selected_group}")
+            # 如果没有书被选中，显示欢迎页面
+            if self.book_table_widget.currentRow() == -1:
+                self.central_stacked_widget.setCurrentIndex(0)
         else:
+            self.update_book_list("") # 清空书籍列表
             self.upload_book_button.setEnabled(False)
+            self.upload_book_button.setText("上传书籍")
             self.central_stacked_widget.setCurrentIndex(0)  # 显示欢迎页面
 
     def update_book_list(self, group_name):
@@ -870,7 +862,7 @@ class MainWindow(QMainWindow):
             for book_title in books:
                 book_path = os.path.join(self.book_manager.data_path, group_name, book_title)
                 metadata = self.book_manager.get_book_metadata(book_path)
-                status = metadata.get("status", "未知") if metadata else "未知"
+                status = metadata.get("status", "未处理") if metadata else "未处理"
 
                 row_position = self.book_table_widget.rowCount()
                 self.book_table_widget.insertRow(row_position)
@@ -887,16 +879,13 @@ class MainWindow(QMainWindow):
             book_path = self.book_table_widget.item(selected_row, 1).data(Qt.UserRole)
             self.current_book_path = book_path
             # 切换到书籍详情页面
-            self.central_stacked_widget.setCurrentIndex(2)
+            self.central_stacked_widget.setCurrentIndex(1) # 详情页现在是索引1
             # 加载章节信息
             self.load_chapters()
         else:
             self.current_book_path = None
-            # 切换回书籍组页面或欢迎页面
-            if self.book_group_combo.currentText():
-                self.central_stacked_widget.setCurrentIndex(1)  # 书籍组页面
-            else:
-                self.central_stacked_widget.setCurrentIndex(0)  # 欢迎页面
+            # 切换回欢迎页面
+            self.central_stacked_widget.setCurrentIndex(0)
 
     def upload_book(self):
         """上传书籍"""
@@ -919,6 +908,10 @@ class MainWindow(QMainWindow):
                 if success:
                     success_count += 1
                     formatted_title = result
+                    # 创建初始元数据
+                    new_book_path = os.path.join(self.book_manager.data_path, selected_group, formatted_title)
+                    initial_metadata = {"status": "未处理", "chapters": []}
+                    self.book_manager.save_book_metadata(new_book_path, initial_metadata)
                     self.log_message(f"成功上传书籍: {formatted_title}")
                 else:
                     error_messages.append(f"上传 {os.path.basename(file_path)} 失败: {result}")
@@ -1043,6 +1036,8 @@ class MainWindow(QMainWindow):
         if not self.current_book_path:
             QMessageBox.warning(self, "错误", "请先选择一本书")
             return
+            
+        path_to_reselect = self.current_book_path
 
         chapters = []
         for i in range(self.chapter_table.rowCount()):
@@ -1060,69 +1055,18 @@ class MainWindow(QMainWindow):
         if self.book_manager.save_book_metadata(self.current_book_path, metadata):
             QMessageBox.information(self, "成功", "章节信息保存成功")
             self.load_books()
+            
+            # 重新选中之前的书籍
+            if path_to_reselect:
+                for i in range(self.book_table_widget.rowCount()):
+                    item = self.book_table_widget.item(i, 1)
+                    if item and item.data(Qt.UserRole) == path_to_reselect:
+                        self.book_table_widget.selectRow(i)
+                        break
+
+            self.update_button_states() # 更新按钮状态
         else:
             QMessageBox.warning(self, "错误", "保存失败")
-
-    def split_chapters(self):
-        """章节切分功能"""
-        if not self.current_book_path:
-            QMessageBox.warning(self, "错误", "请先选择一本书")
-            return
-
-        # 获取章节信息
-        chapters = []
-        for i in range(self.chapter_table.rowCount()):
-            try:
-                title = self.chapter_table.item(i, 0).text()
-                start_page = int(self.chapter_table.item(i, 1).text())
-                end_page = int(self.chapter_table.item(i, 2).text())
-                chapters.append({"title": title, "start_page": start_page, "end_page": end_page})
-            except (ValueError, AttributeError):
-                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的页码无效，请检查。")
-                return
-
-        if not chapters:
-            QMessageBox.warning(self, "错误", "没有章节信息，请先添加章节")
-            return
-
-        # 确认操作
-        reply = QMessageBox.question(self, "确认切分", f"确定要将PDF切分成 {len(chapters)} 个章节吗？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-
-        self.log_message("开始章节切分...")
-        
-        # 执行切分
-        from core.pdf_processor import split_pdf_by_chapters
-        
-        original_pdf_path = os.path.join(self.current_book_path, "original.pdf")
-        chapters_pdf_dir = os.path.join(self.current_book_path, "chapters_pdf")
-        
-        try:
-            success, error_msg = split_pdf_by_chapters(original_pdf_path, chapters, chapters_pdf_dir)
-            
-            if success:
-                self.log_message(f"章节切分完成！共生成 {len(chapters)} 个章节PDF文件")
-                
-                # 更新元数据状态
-                metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
-                metadata["status"] = "已完成章节切分"
-                metadata["chapters"] = chapters
-                self.book_manager.save_book_metadata(self.current_book_path, metadata)
-                
-                # 刷新书籍列表显示状态
-                self.load_books()
-                
-                QMessageBox.information(self, "成功", "章节切分完成！")
-            else:
-                self.log_message(f"章节切分失败：{error_msg}")
-                QMessageBox.warning(self, "错误", f"章节切分失败：{error_msg}")
-                
-        except Exception as e:
-            error_msg = f"章节切分过程中发生错误：{str(e)}"
-            self.log_message(error_msg)
-            QMessageBox.critical(self, "错误", error_msg)
 
     def load_chapters(self):
         """加载章节信息"""
@@ -1166,30 +1110,27 @@ class MainWindow(QMainWindow):
     def update_button_states(self):
         """更新按钮的启用状态"""
         if not self.current_book_path:
-            self.split_chapters_button.setEnabled(False)
-            self.mineru_process_button.setEnabled(False)
-            self.llm_analyze_button.setEnabled(False)
+            self.start_processing_button.setEnabled(False)
             return
 
-        # 检查是否有章节信息且PDF文件存在
-        has_chapters = self.chapter_table.rowCount() > 0
-        pdf_exists = os.path.exists(os.path.join(self.current_book_path, "original.pdf"))
+        # 检查元数据
+        metadata = self.book_manager.get_book_metadata(self.current_book_path)
+        status = metadata.get("status") if metadata else None
         
-        self.split_chapters_button.setEnabled(has_chapters and pdf_exists)
+        # 允许处理的状态
+        allowed_statuses = ["完成章节编辑", "处理完成"]
+        can_process = status in allowed_statuses
+        
+        # 检查PDF文件是否存在
+        pdf_exists = os.path.exists(os.path.join(self.current_book_path, "original.pdf"))
 
-        # MinerU解析按钮状态
-        chapters_pdf_dir = os.path.join(self.current_book_path, "chapters_pdf")
-        mineru_ready = os.path.exists(chapters_pdf_dir) and len(os.listdir(chapters_pdf_dir)) > 0
-        self.mineru_process_button.setEnabled(mineru_ready)
-
-        # LLM分析按钮状态
-        chapters_markdown_dir = os.path.join(self.current_book_path, "chapters_markdown")
-        llm_ready = os.path.exists(chapters_markdown_dir) and len(os.listdir(chapters_markdown_dir)) > 0
-        self.llm_analyze_button.setEnabled(llm_ready)
-
-        # 生成Word报告按钮状态
-        llm_result_exists = os.path.exists(os.path.join(self.current_book_path, "llm_result"))
-        self.generate_report_button.setEnabled(llm_result_exists)
+        # “开始处理”按钮在特定状态下且PDF存在时可用
+        self.start_processing_button.setEnabled(can_process and pdf_exists)
 
         # 更新上传按钮状态
-        self.upload_book_button.setEnabled(bool(self.book_group_combo.currentText()))
+        selected_group = self.book_group_combo.currentText()
+        self.upload_book_button.setEnabled(bool(selected_group))
+        if selected_group:
+            self.upload_book_button.setText(f"上传到 {selected_group}")
+        else:
+            self.upload_book_button.setText("上传书籍")

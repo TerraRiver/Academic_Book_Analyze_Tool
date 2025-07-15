@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QComboBox,
     QMessageBox,
-    QGroupBox
+    QGroupBox,
+    QFileDialog
 )
 
 
@@ -42,6 +43,9 @@ class SettingsDialog(QDialog):
         # 创建标签页
         self.tab_widget = QTabWidget()
         layout.addWidget(self.tab_widget)
+        
+        # 通用设置标签页
+        self.create_general_tab()
         
         # MinerU设置标签页
         self.create_mineru_tab()
@@ -106,8 +110,8 @@ class SettingsDialog(QDialog):
         options_layout.addRow("表格识别:", self.enable_table)
         
         self.language = QComboBox()
-        self.language.addItems(["zh", "en", "auto"])
-        self.language.setCurrentText("zh")
+        self.language.addItems(["ch", "en", "auto"])
+        self.language.setCurrentText("ch")
         options_layout.addRow("文档语言:", self.language)
         
         layout.addWidget(options_group)
@@ -215,11 +219,52 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         
         self.tab_widget.addTab(llm_widget, "LLM设置")
+
+    def create_general_tab(self):
+        """创建通用设置标签页"""
+        general_widget = QWidget()
+        layout = QVBoxLayout(general_widget)
+
+        # 报告输出路径组
+        report_group = QGroupBox("报告设置")
+        report_layout = QFormLayout(report_group)
+
+        # 创建一个水平布局来放置输入框和按钮
+        path_layout = QHBoxLayout()
+        self.report_output_path = QLineEdit()
+        self.report_output_path.setPlaceholderText("默认为书籍所在目录")
+        path_layout.addWidget(self.report_output_path)
+
+        self.select_path_button = QPushButton("选择...")
+        self.select_path_button.clicked.connect(self.select_report_path)
+        path_layout.addWidget(self.select_path_button)
+
+        report_layout.addRow("Word报告输出路径:", path_layout)
+        
+        layout.addWidget(report_group)
+        layout.addStretch()
+        
+        self.tab_widget.insertTab(0, general_widget, "通用设置")
+
+    def select_report_path(self):
+        """选择报告输出路径"""
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择文件夹",
+            self.report_output_path.text() or os.getcwd()
+        )
+        if directory:
+            self.report_output_path.setText(directory)
     
     def load_settings(self):
         """从配置文件加载设置"""
         if os.path.exists(self.config_file):
             self.config.read(self.config_file, encoding='utf-8')
+
+            # 加载通用设置
+            if self.config.has_section('General'):
+                general_section = self.config['General']
+                self.report_output_path.setText(general_section.get('report_output_path', ''))
             
             # 加载MinerU设置
             if self.config.has_section('MinerU'):
@@ -253,12 +298,18 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         """保存设置到配置文件"""
         # 确保配置文件有必要的节
+        if not self.config.has_section('General'):
+            self.config.add_section('General')
         if not self.config.has_section('MinerU'):
             self.config.add_section('MinerU')
         if not self.config.has_section('DeepSeek'):
             self.config.add_section('DeepSeek')
         if not self.config.has_section('LLM'):
             self.config.add_section('LLM')
+
+        # 保存通用设置
+        general_section = self.config['General']
+        general_section['report_output_path'] = self.report_output_path.text()
         
         # 保存MinerU设置
         mineru_section = self.config['MinerU']

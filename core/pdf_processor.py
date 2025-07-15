@@ -45,8 +45,12 @@ def split_pdf_by_chapters(original_pdf_path: str, chapters: list, output_dir: st
             for page_num in range(start_page - 1, end_page):
                 writer.add_page(reader.pages[page_num])
             
-            # 清理文件名中的非法字符
+            # 清理文件名中的非法字符并限制长度
             safe_title = "".join(c for c in chapter['title'] if c.isalnum() or c in (' ', '_')).rstrip()
+            # 限制标题长度，确保最终文件名不会太长（考虑到data_id有128字符限制）
+            # 格式是：02d_safe_title.pdf，所以safe_title部分最好不超过100字符
+            if len(safe_title) > 100:
+                safe_title = safe_title[:100].rstrip()
             output_filename = os.path.join(output_dir, f"{i+1:02d}_{safe_title}.pdf")
             
             with open(output_filename, "wb") as f:

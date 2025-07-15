@@ -1,7 +1,7 @@
 import sys
 import os
 import json
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -19,9 +19,73 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QMenu,
+    QDialog,
+    QProgressBar,
 )
 from core.book_manager import BookManager
 from core.pdf_processor import get_bookmarks
+from core.api_handler import APIHandler
+from ui.settings_dialog import SettingsDialog
+
+
+class MinerUWorker(QThread):
+    """MinerU处理工作线程"""
+    finished = Signal(bool)
+    log_message = Signal(str)
+    
+    def __init__(self, book_path, chapters):
+        super().__init__()
+        self.book_path = book_path
+        self.chapters = chapters
+        self.api_handler = APIHandler()
+    
+    def run(self):
+        """在后台线程中执行MinerU处理"""
+        try:
+            def log_callback(message):
+                self.log_message.emit(message)
+            
+            success = self.api_handler.process_book_chapters(
+                self.book_path, 
+                self.chapters,
+                log_callback=log_callback
+            )
+            
+            self.finished.emit(success)
+            
+        except Exception as e:
+            self.log_message.emit(f"MinerU处理过程中发生错误：{str(e)}")
+            self.finished.emit(False)
+
+
+class LLMAnalysisWorker(QThread):
+    """LLM分析工作线程"""
+    finished = Signal(bool)
+    log_message = Signal(str)
+    
+    def __init__(self, book_path, chapters):
+        super().__init__()
+        self.book_path = book_path
+        self.chapters = chapters
+        self.api_handler = APIHandler()
+    
+    def run(self):
+        """在后台线程中执行LLM分析"""
+        try:
+            def log_callback(message):
+                self.log_message.emit(message)
+            
+            success = self.api_handler.analyze_chapters(
+                self.book_path, 
+                self.chapters,
+                log_callback=log_callback
+            )
+            
+            self.finished.emit(success)
+            
+        except Exception as e:
+            self.log_message.emit(f"LLM分析过程中发生错误：{str(e)}")
+            self.finished.emit(False)
 
 
 class MainWindow(QMainWindow):
@@ -32,6 +96,11 @@ class MainWindow(QMainWindow):
 
         self.book_manager = BookManager()
         self.current_book_path = None
+        self.mineru_worker = None
+        self.llm_worker = None
+
+        # 创建菜单栏
+        self.create_menu_bar()
 
         # 主布局
         main_widget = QWidget()
@@ -94,6 +163,23 @@ class MainWindow(QMainWindow):
         split_layout.addWidget(self.split_chapters_button)
         right_layout.addLayout(split_layout)
 
+        # 添加处理按钮
+        process_layout = QHBoxLayout()
+        
+        # MinerU处理按钮
+        self.mineru_process_button = QPushButton("MinerU解析")
+        self.mineru_process_button.clicked.connect(self.process_with_mineru)
+        self.mineru_process_button.setEnabled(False)
+        process_layout.addWidget(self.mineru_process_button)
+        
+        # LLM分析按钮
+        self.llm_analyze_button = QPushButton("LLM分析")
+        self.llm_analyze_button.clicked.connect(self.analyze_with_llm)
+        self.llm_analyze_button.setEnabled(False)
+        process_layout.addWidget(self.llm_analyze_button)
+        
+        right_layout.addLayout(process_layout)
+
         main_layout.addWidget(self.right_panel, 2)
 
         # --- 详情/预览面板 ---
@@ -124,6 +210,193 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.detail_panel, 1)
 
         self.load_books()
+
+    def process_with_mineru(self):
+        """使用MinerU处理章节"""
+        if not self.current_book_path:
+            QMessageBox.warning(self, "错误", "请先选择一本书")
+            return
+
+        # 检查是否已完成章节切分
+        chapters_pdf_dir = os.path.join(self.current_book_path, "chapters_pdf")
+        if not os.path.exists(chapters_pdf_dir):
+            QMessageBox.warning(self, "错误", "请先完成章节切分")
+            return
+
+        # 确认操作
+        reply = QMessageBox.question(self, "确认处理", 
+                                   f"确定要使用MinerU处理章节PDF吗？\n这可能会花费较长时间。",
+                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # 禁用按钮，防止重复点击
+        self.mineru_process_button.setEnabled(False)
+        self.mineru_process_button.setText("处理中...")
+
+        # 获取章节信息
+        chapters = []
+        for i in range(self.chapter_table.rowCount()):
+            try:
+                title = self.chapter_table.item(i, 0).text()
+                chapters.append({"title": title})
+            except AttributeError:
+                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的章节标题无效，请检查。")
+                return
+
+        # 创建并启动工作线程
+        self.mineru_worker = MinerUWorker(self.current_book_path, chapters)
+        self.mineru_worker.log_message.connect(self.log_message)
+        self.mineru_worker.finished.connect(self.on_mineru_processing_finished)
+        self.mineru_worker.start()
+
+    def on_mineru_processing_finished(self, success):
+        """MinerU处理完成的回调"""
+        # 恢复按钮状态
+        self.mineru_process_button.setEnabled(True)
+        self.mineru_process_button.setText("MinerU解析")
+
+        if success:
+            # 更新元数据状态
+            metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
+            metadata["status"] = "已完成MinerU解析"
+            self.book_manager.save_book_metadata(self.current_book_path, metadata)
+            
+            # 刷新书籍列表显示状态
+            self.load_books()
+            
+            QMessageBox.information(self, "成功", "MinerU处理完成！")
+        else:
+            QMessageBox.warning(self, "错误", "MinerU处理失败，请查看日志了解详情")
+
+        # 清理工作线程
+        if self.mineru_worker:
+            self.mineru_worker.deleteLater()
+            self.mineru_worker = None
+
+    def analyze_with_llm(self):
+        """使用LLM分析章节"""
+        if not self.current_book_path:
+            QMessageBox.warning(self, "错误", "请先选择一本书")
+            return
+
+        # 检查是否已完成MinerU解析
+        chapters_markdown_dir = os.path.join(self.current_book_path, "chapters_markdown")
+        if not os.path.exists(chapters_markdown_dir):
+            QMessageBox.warning(self, "错误", "请先完成MinerU解析")
+            return
+
+        # 确认操作
+        reply = QMessageBox.question(self, "确认分析", 
+                                   f"确定要使用LLM分析章节内容吗？\n这可能会花费较长时间。",
+                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # 禁用按钮，防止重复点击
+        self.llm_analyze_button.setEnabled(False)
+        self.llm_analyze_button.setText("分析中...")
+
+        # 获取章节信息
+        chapters = []
+        for i in range(self.chapter_table.rowCount()):
+            try:
+                title = self.chapter_table.item(i, 0).text()
+                chapters.append({"title": title})
+            except AttributeError:
+                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的章节标题无效，请检查。")
+                return
+
+        # 创建并启动工作线程
+        self.llm_worker = LLMAnalysisWorker(self.current_book_path, chapters)
+        self.llm_worker.log_message.connect(self.log_message)
+        self.llm_worker.finished.connect(self.on_llm_analysis_finished)
+        self.llm_worker.start()
+
+    def on_llm_analysis_finished(self, success):
+        """LLM分析完成的回调"""
+        # 恢复按钮状态
+        self.llm_analyze_button.setEnabled(True)
+        self.llm_analyze_button.setText("LLM分析")
+
+        if success:
+            # 更新元数据状态
+            metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
+            metadata["status"] = "已完成LLM分析"
+            self.book_manager.save_book_metadata(self.current_book_path, metadata)
+            
+            # 刷新书籍列表显示状态
+            self.load_books()
+            
+            QMessageBox.information(self, "成功", "LLM分析完成！")
+        else:
+            QMessageBox.warning(self, "错误", "LLM分析失败，请查看日志了解详情")
+
+        # 清理工作线程
+        if self.llm_worker:
+            self.llm_worker.deleteLater()
+            self.llm_worker = None
+
+    def create_menu_bar(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 文件菜单
+        file_menu = menubar.addMenu("文件")
+        
+        # 设置菜单项
+        settings_action = file_menu.addAction("设置")
+        settings_action.setShortcut("Ctrl+,")
+        settings_action.triggered.connect(self.open_settings)
+        
+        file_menu.addSeparator()
+        
+        # 退出菜单项
+        exit_action = file_menu.addAction("退出")
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        
+        # 工具菜单
+        tools_menu = menubar.addMenu("工具")
+        
+        # 批量处理菜单项
+        batch_process_action = tools_menu.addAction("批量处理")
+        batch_process_action.triggered.connect(self.batch_process)
+        batch_process_action.setEnabled(False)  # 暂时禁用，将来实现
+        
+        # 帮助菜单
+        help_menu = menubar.addMenu("帮助")
+        
+        # 关于菜单项
+        about_action = help_menu.addAction("关于")
+        about_action.triggered.connect(self.show_about)
+
+    def open_settings(self):
+        """打开设置对话框"""
+        dialog = SettingsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self.log_message("设置已更新")
+
+    def batch_process(self):
+        """批量处理功能（待实现）"""
+        QMessageBox.information(self, "提示", "批量处理功能将在后续版本中实现")
+
+    def show_about(self):
+        """显示关于对话框"""
+        about_text = """
+<h3>国际关系研究阅读助手</h3>
+<p>版本: 1.0.0</p>
+<p>这是一个专为国际关系研究人员设计的PDF文献处理工具。</p>
+<p><b>主要功能：</b></p>
+<ul>
+<li>PDF章节切分</li>
+<li>MinerU智能解析</li>
+<li>LLM内容分析</li>
+<li>结构化报告生成</li>
+</ul>
+<p>作者: TR开发团队</p>
+        """
+        QMessageBox.about(self, "关于", about_text)
 
     def load_books(self):
         """
@@ -227,41 +500,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "成功", "书籍组创建成功")
             else:
                 QMessageBox.warning(self, "错误", message)
-
-    def upload_book(self):
-        current_item = self.book_tree_widget.currentItem()
-        if not current_item or current_item.parent() is not None:
-            QMessageBox.warning(self, "错误", "请先选择一个书籍组")
-            return
-
-        group_name = current_item.text(0)
-        file_paths, _ = QFileDialog.getOpenFileNames(self, "选择 PDF 文件", "", "PDF Files (*.pdf)")
-        if file_paths:
-            try:
-                start_index = len(self.book_manager.scan_books_in_group(group_name))
-            except Exception:
-                start_index = 0
-
-            success_count = 0
-            error_messages = []
-            for i, file_path in enumerate(file_paths):
-                success, result = self.book_manager.upload_book(group_name, file_path, start_index + i)
-                if success:
-                    success_count += 1
-                    formatted_title = result
-                    book_path = os.path.join(self.book_manager.data_path, group_name, formatted_title)
-                    initial_metadata = {"status": "未处理", "chapters": []}
-                    self.book_manager.save_book_metadata(book_path, initial_metadata)
-                else:
-                    error_messages.append(f"{os.path.basename(file_path)}: {result}")
-            
-            self.load_books()
-            
-            if success_count > 0:
-                QMessageBox.information(self, "成功", f"{success_count} 本书籍上传成功")
-            
-            if error_messages:
-                QMessageBox.warning(self, "上传失败", "\n".join(error_messages))
 
     def save_chapters(self):
         if not self.current_book_path:
@@ -399,6 +637,38 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.warning(self, "错误", message)
 
+    def upload_book(self):
+        current_item = self.book_tree_widget.currentItem()
+        if not current_item or current_item.parent() is not None:
+            QMessageBox.warning(self, "错误", "请先选择一个书籍组")
+            return
+
+        group_name = current_item.text(0)
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "选择 PDF 文件", "", "PDF Files (*.pdf)")
+        if file_paths:
+            try:
+                start_index = len(self.book_manager.scan_books_in_group(group_name))
+            except Exception:
+                start_index = 0
+
+            success_count = 0
+            error_messages = []
+            for i, file_path in enumerate(file_paths):
+                success, result = self.book_manager.upload_book(group_name, file_path, start_index + i)
+                if success:
+                    success_count += 1
+                    formatted_title = result
+                    self.log_message(f"成功上传书籍: {formatted_title}")
+                else:
+                    error_messages.append(f"上传 {os.path.basename(file_path)} 失败: {result}")
+                    self.log_message(f"上传 {os.path.basename(file_path)} 失败: {result}")
+
+            self.load_books()
+            if success_count > 0:
+                QMessageBox.information(self, "上传完成", f"成功上传 {success_count} 本书籍。")
+            if error_messages:
+                QMessageBox.warning(self, "上传失败", "\n".join(error_messages))
+
     def split_chapters(self):
         """章节切分功能"""
         if not self.current_book_path:
@@ -465,6 +735,8 @@ class MainWindow(QMainWindow):
         if not self.current_book_path:
             self.book_info_label.setText("请选择一本书籍")
             self.split_chapters_button.setEnabled(False)
+            self.mineru_process_button.setEnabled(False)
+            self.llm_analyze_button.setEnabled(False)
             return
 
         # 获取书籍基本信息
@@ -510,6 +782,8 @@ class MainWindow(QMainWindow):
         """更新按钮的启用状态"""
         if not self.current_book_path:
             self.split_chapters_button.setEnabled(False)
+            self.mineru_process_button.setEnabled(False)
+            self.llm_analyze_button.setEnabled(False)
             return
 
         # 检查是否有章节信息且PDF文件存在
@@ -517,6 +791,16 @@ class MainWindow(QMainWindow):
         pdf_exists = os.path.exists(os.path.join(self.current_book_path, "original.pdf"))
         
         self.split_chapters_button.setEnabled(has_chapters and pdf_exists)
+
+        # MinerU解析按钮状态
+        chapters_pdf_dir = os.path.join(self.current_book_path, "chapters_pdf")
+        mineru_ready = os.path.exists(chapters_pdf_dir) and len(os.listdir(chapters_pdf_dir)) > 0
+        self.mineru_process_button.setEnabled(mineru_ready)
+
+        # LLM分析按钮状态
+        chapters_markdown_dir = os.path.join(self.current_book_path, "chapters_markdown")
+        llm_ready = os.path.exists(chapters_markdown_dir) and len(os.listdir(chapters_markdown_dir)) > 0
+        self.llm_analyze_button.setEnabled(llm_ready)
 
     def log_message(self, message):
         """添加日志消息"""

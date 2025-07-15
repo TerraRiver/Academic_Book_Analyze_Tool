@@ -704,7 +704,7 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         
         # 文件菜单
-        file_menu = menubar.addMenu("文件")
+        file_menu = menubar.addMenu("工具")
         
         # 设置菜单项
         settings_action = file_menu.addAction("设置")
@@ -717,14 +717,6 @@ class MainWindow(QMainWindow):
         exit_action = file_menu.addAction("退出")
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
-        
-        # 工具菜单
-        tools_menu = menubar.addMenu("工具")
-        
-        # 批量处理菜单项
-        batch_process_action = tools_menu.addAction("批量处理")
-        batch_process_action.triggered.connect(self.batch_process)
-        batch_process_action.setEnabled(False)  # 暂时禁用
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助")
@@ -748,7 +740,7 @@ class MainWindow(QMainWindow):
         about_text = """
 <h3>国际关系研究阅读助手</h3>
 <p>版本: 1.0.0</p>
-<p>这是一个专为国际关系研究人员设计的PDF文献处理工具。</p>
+<p>这是一个专为国际关系研究人员设计的书籍类PDF文献处理工具。</p>
 <p><b>主要功能：</b></p>
 <ul>
 <li>PDF章节切分</li>
@@ -756,7 +748,7 @@ class MainWindow(QMainWindow):
 <li>LLM内容分析</li>
 <li>结构化报告生成</li>
 </ul>
-<p>作者: TR开发团队</p>
+<p>作者: 泥河</p>
         """
         QMessageBox.about(self, "关于", about_text)
 

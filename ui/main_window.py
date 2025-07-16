@@ -1,7 +1,7 @@
 import sys
 import os
 import json
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QStackedWidget, # Added for main content area
     QComboBox, # Added for book group selection
+    QGraphicsOpacityEffect,
 )
 from PySide6.QtWidgets import QTextEdit
 from PySide6.QtGui import QIcon, QFont, QTextCursor
@@ -142,6 +143,7 @@ class FullProcessWorker(QThread):
                 self.log_message.emit(message)
 
             # 1. 章节切分
+            if self.isInterruptionRequested(): return
             self.progress_update.emit("章节切分", 10)
             log_callback("开始章节切分...")
             original_pdf_path = os.path.join(self.book_path, "original.pdf")
@@ -154,6 +156,7 @@ class FullProcessWorker(QThread):
             self.progress_update.emit("章节切分", 25)
 
             # 2. MinerU解析
+            if self.isInterruptionRequested(): return
             self.progress_update.emit("MinerU解析", 30)
             log_callback("开始MinerU解析...")
             success = self.api_handler.process_book_chapters(self.book_path, self.chapters, log_callback=log_callback)
@@ -163,6 +166,7 @@ class FullProcessWorker(QThread):
             self.progress_update.emit("MinerU解析", 50)
 
             # 3. LLM分析
+            if self.isInterruptionRequested(): return
             self.progress_update.emit("LLM分析", 55)
             log_callback("开始LLM分析...")
             success = self.api_handler.analyze_chapters(self.book_path, self.chapters, log_callback=log_callback)
@@ -172,6 +176,7 @@ class FullProcessWorker(QThread):
             self.progress_update.emit("LLM分析", 75)
 
             # 4. 生成Word报告
+            if self.isInterruptionRequested(): return
             self.progress_update.emit("生成Word报告", 80)
             log_callback("开始生成Word报告...")
             report_path = self.book_manager.generate_book_report(self.book_path, log_callback=log_callback)
@@ -180,26 +185,29 @@ class FullProcessWorker(QThread):
             log_callback(f"Word报告生成完成！路径：{report_path}")
             self.progress_update.emit("处理完成", 100)
 
+            if self.isInterruptionRequested(): return
             self.finished.emit(True, f"处理完成！报告已生成于：\n{report_path}")
 
         except Exception as e:
-            error_message = f"处理流程中发生错误：{str(e)}"
-            self.log_message.emit(error_message)
-            self.finished.emit(False, error_message)
+            if not self.isInterruptionRequested():
+                error_message = f"处理流程中发生错误：{str(e)}"
+                self.log_message.emit(error_message)
+                self.finished.emit(False, error_message)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("国际关系研究阅读助手")
-        self.setGeometry(100, 100, 1200, 800)
-
+        self.setGeometry(100, 100, 1500, 800)
+        self.setWindowIcon(QIcon("assets/icons/app_icon.ico"))
         self.book_manager = BookManager()
         self.current_book_path = None
         self.mineru_worker = None
         self.llm_worker = None
         self.report_worker = None
         self.full_process_worker = None
+        self.processing_animation = None
 
         # 创建菜单栏
         self.create_menu_bar()
@@ -244,7 +252,10 @@ class MainWindow(QMainWindow):
         self.book_table_widget.setObjectName("book_table_widget")
         self.book_table_widget.setColumnCount(2)
         self.book_table_widget.setHorizontalHeaderLabels(["状态", "书籍名称"])
-        self.book_table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.book_table_widget.horizontalHeader()
+        self.book_table_widget.setColumnWidth(0, 120)  # 状态列固定100像素
+        header.setSectionResizeMode(0, QHeaderView.Fixed)    # 状态列固定宽度
+        header.setSectionResizeMode(1, QHeaderView.Stretch)  # 书籍名称列自适应填充
         self.book_table_widget.setSelectionBehavior(QTableWidget.SelectRows) # 整行选中
         self.book_table_widget.setEditTriggers(QTableWidget.NoEditTriggers) # 不可编辑
         self.book_table_widget.setSelectionMode(QTableWidget.SingleSelection) # 单选模式
@@ -329,7 +340,7 @@ class MainWindow(QMainWindow):
 
         # 添加“开始处理”按钮
         process_layout = QHBoxLayout()
-        self.start_processing_button = QPushButton("开始处理")
+        self.start_processing_button = QPushButton("开始处理(保存章节后可点击)")
         self.start_processing_button.setIcon(QIcon("assets/icons/start.png")) # 假设有这个图标
         self.start_processing_button.clicked.connect(self.start_full_process)
         self.start_processing_button.setEnabled(False)
@@ -351,11 +362,22 @@ class MainWindow(QMainWindow):
         self.log_text_edit.setReadOnly(True)
         log_layout.addWidget(self.log_text_edit)
         
-        # 清空日志按钮
-        clear_log_button = QPushButton("清空日志")
-        clear_log_button.setIcon(QIcon("assets/icons/clear.png"))
-        clear_log_button.clicked.connect(self.clear_log)
-        log_layout.addWidget(clear_log_button)
+        # 日志操作按钮
+        log_button_layout = QHBoxLayout()
+        
+        self.clear_log_button = QPushButton("清空日志")
+        self.clear_log_button.setIcon(QIcon("assets/icons/clear.png"))
+        self.clear_log_button.clicked.connect(self.clear_log)
+        
+        self.terminate_button = QPushButton("终止处理")
+        self.terminate_button.setObjectName("danger") # 应用危险操作样式
+        self.terminate_button.setIcon(QIcon("assets/icons/stop.png")) # 假设有停止图标
+        self.terminate_button.clicked.connect(self.terminate_process)
+        self.terminate_button.setEnabled(False) # 初始禁用
+
+        log_button_layout.addWidget(self.clear_log_button)
+        log_button_layout.addWidget(self.terminate_button)
+        log_layout.addLayout(log_button_layout)
         
         main_layout.addWidget(self.log_panel, 2)
 
@@ -374,9 +396,28 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        # 禁用按钮
+        # 禁用按钮并开始动画
         self.start_processing_button.setEnabled(False)
-        self.start_processing_button.setText("处理中...")
+        
+        # 如果不存在，则创建不透明效果
+        if not self.start_processing_button.graphicsEffect():
+            self.opacity_effect = QGraphicsOpacityEffect(self.start_processing_button)
+            self.start_processing_button.setGraphicsEffect(self.opacity_effect)
+        else:
+            self.opacity_effect = self.start_processing_button.graphicsEffect()
+
+        # 停止任何先前的动画
+        if self.processing_animation and self.processing_animation.state() == QPropertyAnimation.Running:
+            self.processing_animation.stop()
+
+        # 创建并配置动画
+        self.processing_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.processing_animation.setDuration(800)  # 800毫秒
+        self.processing_animation.setStartValue(1.0)
+        self.processing_animation.setEndValue(0.3)
+        self.processing_animation.setEasingCurve(QEasingCurve.InOutQuad)
+        self.processing_animation.setLoopCount(-1)  # 无限循环
+        self.processing_animation.start()
 
         # 获取章节信息
         chapters = []
@@ -399,6 +440,9 @@ class MainWindow(QMainWindow):
         self.full_process_worker.finished.connect(self.on_full_process_finished)
         self.full_process_worker.start()
 
+        # 启用终止按钮
+        self.terminate_button.setEnabled(True)
+
     def update_progress(self, step_name, percentage):
         """更新处理进度"""
         self.start_processing_button.setText(f"{step_name} ({percentage}%)")
@@ -406,12 +450,24 @@ class MainWindow(QMainWindow):
 
     def on_full_process_finished(self, success, message):
         """完整处理流程完成的回调"""
+        # 停止动画
+        if self.processing_animation:
+            self.processing_animation.stop()
+            if self.start_processing_button.graphicsEffect():
+                self.start_processing_button.graphicsEffect().setOpacity(1.0)
+            self.processing_animation = None
+
         self.start_processing_button.setEnabled(True)
         self.start_processing_button.setText("开始处理")
+        self.terminate_button.setEnabled(False) # 禁用终止按钮
         
         path_to_reselect = self.current_book_path
 
-        if success:
+        # 检查是否是用户手动终止的
+        if self.full_process_worker and self.full_process_worker.isInterruptionRequested():
+            self.log_message("处理流程已被用户终止。")
+            QMessageBox.warning(self, "操作取消", "处理流程已被用户终止。")
+        elif success:
             # 更新元数据状态为“处理完成”
             if self.current_book_path:
                 metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
@@ -436,6 +492,18 @@ class MainWindow(QMainWindow):
         if self.full_process_worker:
             self.full_process_worker.deleteLater()
             self.full_process_worker = None
+
+    def terminate_process(self):
+        """暴力终止当前正在运行的处理流程，通过重启应用实现"""
+        if self.full_process_worker and self.full_process_worker.isRunning():
+            reply = QMessageBox.question(self, "确认重启", 
+                                       "确定要终止当前的处理流程并重启应用吗？\n未保存的进度将会丢失。",
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.log_message("用户请求重启应用...")
+                # 强制重启应用
+                QApplication.quit()
+                os.execl(sys.executable, sys.executable, *sys.argv)
 
     def setup_ui_styles(self):
         """设置UI的整体样式"""
@@ -832,7 +900,7 @@ class MainWindow(QMainWindow):
         if selected_group and selected_group != "未选择":
             self.update_book_list(selected_group)
             self.upload_book_button.setEnabled(True)
-            self.upload_book_button.setText(f"上传到 {selected_group}")
+            self.upload_book_button.setText(f"上传书籍到 {selected_group}")
             # 如果没有书被选中，显示欢迎页面
             if self.book_table_widget.currentRow() == -1:
                 self.central_stacked_widget.setCurrentIndex(0)

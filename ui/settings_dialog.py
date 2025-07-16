@@ -141,34 +141,39 @@ class SettingsDialog(QDialog):
         """创建LLM设置标签页"""
         llm_widget = QWidget()
         layout = QVBoxLayout(llm_widget)
-        
-        # DeepSeek API配置组
-        api_group = QGroupBox("DeepSeek API配置")
-        api_layout = QFormLayout(api_group)
-        
+
+        # 模型提供商配置组
+        provider_group = QGroupBox("模型提供商 (LLM Provider)")
+        provider_layout = QFormLayout(provider_group)
+
+        self.llm_provider_combo = QComboBox()
+        self.llm_provider_combo.addItems(["DeepSeek", "Gemini"])
+        self.llm_provider_combo.currentTextChanged.connect(self._on_llm_provider_changed)
+        provider_layout.addRow("选择模型提供商:", self.llm_provider_combo)
+
+        # DeepSeek API Key (initially hidden)
+        self.deepseek_api_key_label = QLabel("DeepSeek API Key:")
         self.deepseek_api_key = QLineEdit()
         self.deepseek_api_key.setEchoMode(QLineEdit.Password)
         self.deepseek_api_key.setPlaceholderText("请输入DeepSeek API Key")
-        api_layout.addRow("API Key:", self.deepseek_api_key)
-        
-        self.deepseek_base_url = QLineEdit()
-        self.deepseek_base_url.setPlaceholderText("https://api.deepseek.com")
-        self.deepseek_base_url.setText("https://api.deepseek.com")
-        api_layout.addRow("Base URL:", self.deepseek_base_url)
-        
-        self.model_name = QComboBox()
-        self.model_name.setEditable(True)
-        self.model_name.addItems([
-            "deepseek-chat",
-            "deepseek-coder",
-            "gpt-3.5-turbo",
-            "gpt-4",
-            "gpt-4-turbo"
-        ])
-        self.model_name.setCurrentText("deepseek-chat")
-        api_layout.addRow("模型名称:", self.model_name)
-        
-        layout.addWidget(api_group)
+        provider_layout.addRow(self.deepseek_api_key_label, self.deepseek_api_key)
+
+        # Gemini API Key (initially hidden)
+        self.gemini_api_key_label = QLabel("Gemini API Key:")
+        self.gemini_api_key = QLineEdit()
+        self.gemini_api_key.setEchoMode(QLineEdit.Password)
+        self.gemini_api_key.setPlaceholderText("请输入Gemini API Key")
+        provider_layout.addRow(self.gemini_api_key_label, self.gemini_api_key)
+
+        self.llm_base_url = QLineEdit()
+        self.llm_base_url.setPlaceholderText("将根据模型提供商自动填充")
+        provider_layout.addRow("Base URL:", self.llm_base_url)
+
+        self.llm_model_name = QComboBox()
+        self.llm_model_name.setEditable(True)
+        provider_layout.addRow("模型名称:", self.llm_model_name)
+
+        layout.addWidget(provider_group)
         
         # 模型参数组
         params_group = QGroupBox("模型参数")
@@ -255,61 +260,87 @@ class SettingsDialog(QDialog):
         )
         if directory:
             self.report_output_path.setText(directory)
+
+    def _on_llm_provider_changed(self, provider):
+        """当LLM提供商变化时更新UI"""
+        is_deepseek = provider == "DeepSeek"
+        is_gemini = provider == "Gemini"
+
+        # 控制API Key输入框的可见性
+        self.deepseek_api_key_label.setVisible(is_deepseek)
+        self.deepseek_api_key.setVisible(is_deepseek)
+        self.gemini_api_key_label.setVisible(is_gemini)
+        self.gemini_api_key.setVisible(is_gemini)
+
+        # 更新URL和模型列表
+        self.llm_model_name.clear()
+        if is_deepseek:
+            self.llm_base_url.setText(self.config.get('DeepSeek', 'base_url', fallback='https://api.deepseek.com'))
+            self.llm_model_name.addItems(["deepseek-chat"])
+            self.llm_model_name.setCurrentText(self.config.get('LLM', 'model_name', fallback='deepseek-chat'))
+        elif is_gemini:
+            self.llm_base_url.setText(self.config.get('Gemini', 'base_url', fallback='https://generativelanguage.googleapis.com'))
+            self.llm_model_name.addItems(["gemini-2.5-pro","gemini-2.5-flash"])
+            self.llm_model_name.setCurrentText(self.config.get('LLM', 'model_name', fallback='gemini-2.5-flash'))
     
     def load_settings(self):
         """从配置文件加载设置"""
-        if os.path.exists(self.config_file):
-            self.config.read(self.config_file, encoding='utf-8')
+        if not os.path.exists(self.config_file):
+            self._on_llm_provider_changed(self.llm_provider_combo.currentText())
+            return
+            
+        self.config.read(self.config_file, encoding='utf-8')
 
-            # 加载通用设置
-            if self.config.has_section('General'):
-                general_section = self.config['General']
-                self.report_output_path.setText(general_section.get('report_output_path', ''))
+        # 加载通用设置
+        if self.config.has_section('General'):
+            general_section = self.config['General']
+            self.report_output_path.setText(general_section.get('report_output_path', ''))
+        
+        # 加载MinerU设置
+        if self.config.has_section('MinerU'):
+            mineru_section = self.config['MinerU']
+            self.mineru_api_key.setText(mineru_section.get('api_key', ''))
+            self.mineru_base_url.setText(mineru_section.get('base_url', 'https://api.mineru.com'))
+            self.enable_ocr.setChecked(mineru_section.getboolean('enable_ocr', True))
+            self.enable_formula.setChecked(mineru_section.getboolean('enable_formula', True))
+            self.enable_table.setChecked(mineru_section.getboolean('enable_table', True))
+            self.language.setCurrentText(mineru_section.get('language', 'zh'))
+            self.poll_interval.setValue(mineru_section.getint('poll_interval', 10))
+            self.max_attempts.setValue(mineru_section.getint('max_attempts', 60))
+        
+        # 加载LLM提供商的独立设置
+        self.deepseek_api_key.setText(self.config.get('DeepSeek', 'api_key', fallback=''))
+        self.gemini_api_key.setText(self.config.get('Gemini', 'api_key', fallback=''))
+
+        # 加载LLM通用设置
+        if self.config.has_section('LLM'):
+            llm_section = self.config['LLM']
+            provider = llm_section.get('provider', 'DeepSeek')
+            self.llm_provider_combo.setCurrentText(provider)
             
-            # 加载MinerU设置
-            if self.config.has_section('MinerU'):
-                mineru_section = self.config['MinerU']
-                self.mineru_api_key.setText(mineru_section.get('api_key', ''))
-                self.mineru_base_url.setText(mineru_section.get('base_url', 'https://api.mineru.com'))
-                self.enable_ocr.setChecked(mineru_section.getboolean('enable_ocr', True))
-                self.enable_formula.setChecked(mineru_section.getboolean('enable_formula', True))
-                self.enable_table.setChecked(mineru_section.getboolean('enable_table', True))
-                self.language.setCurrentText(mineru_section.get('language', 'zh'))
-                self.poll_interval.setValue(mineru_section.getint('poll_interval', 10))
-                self.max_attempts.setValue(mineru_section.getint('max_attempts', 60))
+            # 手动触发一次更新，以确保UI状态正确
+            self._on_llm_provider_changed(provider)
             
-            # 加载DeepSeek设置
-            if self.config.has_section('DeepSeek'):
-                deepseek_section = self.config['DeepSeek']
-                self.deepseek_api_key.setText(deepseek_section.get('api_key', ''))
-                self.deepseek_base_url.setText(deepseek_section.get('base_url', 'https://api.deepseek.com'))
-                self.model_name.setCurrentText(deepseek_section.get('model_name', 'deepseek-chat'))
-                self.temperature.setValue(deepseek_section.getfloat('temperature', 0.7))
-                self.max_tokens.setValue(deepseek_section.getint('max_tokens', 2000))
-            
-            # 加载LLM设置
-            if self.config.has_section('LLM'):
-                llm_section = self.config['LLM']
-                prompt = llm_section.get('prompt', '')
-                if prompt:
-                    self.system_prompt.setPlainText(prompt)
-                self.max_concurrent_llm_calls.setValue(llm_section.getint('max_concurrent_llm_calls', 5))
+            self.llm_model_name.setCurrentText(llm_section.get('model_name', 'deepseek-chat'))
+            self.temperature.setValue(llm_section.getfloat('temperature', 0.7))
+            self.max_tokens.setValue(llm_section.getint('max_tokens', 2000))
+            prompt = llm_section.get('prompt', '')
+            if prompt:
+                self.system_prompt.setPlainText(prompt)
+            self.max_concurrent_llm_calls.setValue(llm_section.getint('max_concurrent_llm_calls', 5))
+        else:
+            # 如果没有LLM部分，手动触发默认值
+            self._on_llm_provider_changed(self.llm_provider_combo.currentText())
     
     def save_settings(self):
         """保存设置到配置文件"""
         # 确保配置文件有必要的节
-        if not self.config.has_section('General'):
-            self.config.add_section('General')
-        if not self.config.has_section('MinerU'):
-            self.config.add_section('MinerU')
-        if not self.config.has_section('DeepSeek'):
-            self.config.add_section('DeepSeek')
-        if not self.config.has_section('LLM'):
-            self.config.add_section('LLM')
+        for section in ['General', 'MinerU', 'DeepSeek', 'Gemini', 'LLM']:
+            if not self.config.has_section(section):
+                self.config.add_section(section)
 
         # 保存通用设置
-        general_section = self.config['General']
-        general_section['report_output_path'] = self.report_output_path.text()
+        self.config['General']['report_output_path'] = self.report_output_path.text()
         
         # 保存MinerU设置
         mineru_section = self.config['MinerU']
@@ -322,16 +353,23 @@ class SettingsDialog(QDialog):
         mineru_section['poll_interval'] = str(self.poll_interval.value())
         mineru_section['max_attempts'] = str(self.max_attempts.value())
         
-        # 保存DeepSeek设置
-        deepseek_section = self.config['DeepSeek']
-        deepseek_section['api_key'] = self.deepseek_api_key.text()
-        deepseek_section['base_url'] = self.deepseek_base_url.text()
-        deepseek_section['model_name'] = self.model_name.currentText()
-        deepseek_section['temperature'] = str(self.temperature.value())
-        deepseek_section['max_tokens'] = str(self.max_tokens.value())
+        # 保存各个LLM提供商的设置
+        self.config['DeepSeek']['api_key'] = self.deepseek_api_key.text()
+        self.config['Gemini']['api_key'] = self.gemini_api_key.text()
         
-        # 保存LLM设置
+        # 根据当前选择保存URL
+        provider = self.llm_provider_combo.currentText()
+        if provider == "DeepSeek":
+            self.config['DeepSeek']['base_url'] = self.llm_base_url.text()
+        elif provider == "Gemini":
+            self.config['Gemini']['base_url'] = self.llm_base_url.text()
+
+        # 保存LLM通用设置
         llm_section = self.config['LLM']
+        llm_section['provider'] = self.llm_provider_combo.currentText()
+        llm_section['model_name'] = self.llm_model_name.currentText()
+        llm_section['temperature'] = str(self.temperature.value())
+        llm_section['max_tokens'] = str(self.max_tokens.value())
         llm_section['prompt'] = self.system_prompt.toPlainText()
         llm_section['max_concurrent_llm_calls'] = str(self.max_concurrent_llm_calls.value())
         

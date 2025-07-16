@@ -39,32 +39,42 @@ class ConfigManager:
             'max_attempts': section.getint('max_attempts', 60)
         }
     
-    def get_deepseek_config(self) -> Dict:
-        """获取DeepSeek配置"""
-        if not self.config.has_section('DeepSeek'):
-            return self._get_default_deepseek_config()
-        
-        section = self.config['DeepSeek']
-        return {
-            'api_key': section.get('api_key', ''),
-            'base_url': section.get('base_url', 'https://api.deepseek.com'),
-            'model_name': section.get('model_name', 'deepseek-chat'),
-            'temperature': section.getfloat('temperature', 0.7),
-            'max_tokens': section.getint('max_tokens', 2000)
-        }
-    
     def get_llm_config(self) -> Dict:
         """获取LLM配置"""
         if not self.config.has_section('LLM'):
             return {
+                'provider': 'DeepSeek',
+                'model_name': 'deepseek-chat',
+                'temperature': 0.7,
+                'max_tokens': 2000,
                 'prompt': self._get_default_system_prompt(),
                 'max_concurrent_calls': 5
             }
         
         section = self.config['LLM']
         return {
+            'provider': section.get('provider', 'DeepSeek'),
+            'model_name': section.get('model_name', 'deepseek-chat'),
+            'temperature': section.getfloat('temperature', 0.7),
+            'max_tokens': section.getint('max_tokens', 2000),
             'prompt': section.get('prompt', self._get_default_system_prompt()),
             'max_concurrent_calls': section.getint('max_concurrent_llm_calls', 5)
+        }
+
+    def get_provider_config(self, provider: str) -> Dict:
+        """获取指定LLM提供商的配置"""
+        section_name = provider
+        if not self.config.has_section(section_name):
+            if provider == "DeepSeek":
+                return self._get_default_deepseek_config()
+            elif provider == "Gemini":
+                return self._get_default_gemini_config()
+            return {}
+            
+        section = self.config[section_name]
+        return {
+            'api_key': section.get('api_key', ''),
+            'base_url': section.get('base_url', '')
         }
     
     def _get_default_mineru_config(self) -> Dict:
@@ -82,10 +92,13 @@ class ConfigManager:
     def _get_default_deepseek_config(self) -> Dict:
         return {
             'api_key': '',
-            'base_url': 'https://api.deepseek.com',
-            'model_name': 'deepseek-chat',
-            'temperature': 0.7,
-            'max_tokens': 2000
+            'base_url': 'https://api.deepseek.com'
+        }
+
+    def _get_default_gemini_config(self) -> Dict:
+        return {
+            'api_key': '',
+            'base_url': 'https://generativelanguage.googleapis.com'
         }
     
     def _get_default_system_prompt(self) -> str:
@@ -100,26 +113,21 @@ class ConfigManager:
 请保持客观、准确，并确保分析结果结构清晰、逻辑严密。"""
 
 
-class DeepSeekAPI:
-    """DeepSeek API调用处理器"""
+class LLMAPI:
+    """通用LLM API调用处理器"""
     
     def __init__(self, config_manager: ConfigManager):
         self.config_manager = config_manager
-        self.deepseek_config = config_manager.get_deepseek_config()
-        self.llm_config = config_manager.get_llm_config()
+        self.llm_config = self.config_manager.get_llm_config()
+        self.provider = self.llm_config['provider']
+        self.provider_config = self.config_manager.get_provider_config(self.provider)
         
-        # 构建API URL
-        self.chat_url = f"{self.deepseek_config['base_url']}/v1/chat/completions"
-        
-        # HTTP headers
-        self.headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {self.deepseek_config["api_key"]}'
-        }
-    
+        if not self.provider_config.get('api_key'):
+            raise ValueError(f"{self.provider} API Key未配置")
+
     def analyze_text(self, text: str) -> Optional[Dict]:
         """
-        使用DeepSeek API分析文本
+        使用所选的LLM API分析文本，并加入指数退避重试机制。
         
         Args:
             text: 要分析的文本内容
@@ -127,36 +135,71 @@ class DeepSeekAPI:
         Returns:
             API响应字典，包含分析结果
         """
-        if not self.deepseek_config['api_key']:
-            raise ValueError("DeepSeek API Key未配置")
-        
+        max_retries = 3
+        base_backoff = 1  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                if self.provider == "DeepSeek":
+                    return self._analyze_with_deepseek(text)
+                elif self.provider == "Gemini":
+                    return self._analyze_with_gemini(text)
+                else:
+                    raise NotImplementedError(f"不支持的LLM提供商: {self.provider}")
+            except requests.exceptions.RequestException as e:
+                # 只对特定的服务器错误 (5xx) 进行重试
+                if e.response is not None and 500 <= e.response.status_code < 600:
+                    if attempt < max_retries - 1:
+                        wait_time = base_backoff * (2 ** attempt) + (os.urandom(1)[0] / 255.0) # 添加抖动
+                        print(f"API调用失败 (尝试 {attempt + 1}/{max_retries})，状态码: {e.response.status_code}。将在 {wait_time:.2f} 秒后重试...")
+                        time.sleep(wait_time)
+                    else:
+                        raise Exception(f"{self.provider} API请求在 {max_retries} 次尝试后仍然失败: {e}")
+                else:
+                    # 对于其他客户端错误或网络问题，直接抛出异常
+                    raise e
+        return None # 如果循环结束仍未成功，理论上不会执行到这里
+
+    def _analyze_with_deepseek(self, text: str) -> Optional[Dict]:
+        """使用DeepSeek API分析"""
+        url = f"{self.provider_config['base_url']}/v1/chat/completions"
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f"Bearer {self.provider_config['api_key']}"
+        }
         payload = {
-            "model": self.deepseek_config['model_name'],
+            "model": self.llm_config['model_name'],
             "messages": [
-                {
-                    "role": "system",
-                    "content": self.llm_config['prompt']
-                },
-                {
-                    "role": "user",
-                    "content": text
-                }
+                {"role": "system", "content": self.llm_config['prompt']},
+                {"role": "user", "content": text}
             ],
-            "temperature": self.deepseek_config['temperature'],
-            "max_tokens": self.deepseek_config['max_tokens']
+            "temperature": self.llm_config['temperature'],
+            "max_tokens": self.llm_config['max_tokens']
         }
         
-        try:
-            response = requests.post(
-                self.chat_url,
-                headers=self.headers,
-                json=payload,
-                timeout=120
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"DeepSeek API请求失败: {e}")
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+        # 统一返回格式
+        result = response.json()
+        return {'content': result['choices'][0]['message']['content']}
+
+    def _analyze_with_gemini(self, text: str) -> Optional[Dict]:
+        """使用Gemini API分析"""
+        url = f"{self.provider_config['base_url']}/v1beta/models/{self.llm_config['model_name']}:generateContent?key={self.provider_config['api_key']}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{"parts": [{"text": f"{self.llm_config['prompt']}\n\n{text}"}]}],
+            "generationConfig": {
+                "temperature": self.llm_config['temperature'],
+                "maxOutputTokens": self.llm_config['max_tokens']
+            }
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+        # 统一返回格式
+        result = response.json()
+        return {'content': result['candidates'][0]['content']['parts'][0]['text']}
 
 
 class MinerUAPI:
@@ -472,7 +515,7 @@ class APIHandler:
     def __init__(self):
         self.config_manager = ConfigManager()
         self.mineru_api = MinerUAPI(self.config_manager)
-        self.deepseek_api = DeepSeekAPI(self.config_manager)
+        self.llm_api = LLMAPI(self.config_manager)
         self.content_extractor = ContentExtractor()
         self.json_to_markdown = JSONToMarkdownConverter()
     
@@ -502,9 +545,8 @@ class APIHandler:
             # 收集章节文件
             chapter_files = []
             for i, chapter in enumerate(chapters):
-                # 根据切分时的命名规则查找文件
-                safe_title = "".join(c for c in chapter['title'] if c.isalnum() or c in (' ', '_')).rstrip()
-                chapter_filename = f"{i+1:02d}_{safe_title}.pdf"
+                # 使用与pdf_processor.py中一致的简单命名规则
+                chapter_filename = f"{i+1:02d}.pdf"
                 chapter_path = os.path.join(chapters_pdf_dir, chapter_filename)
                 
                 if os.path.exists(chapter_path):
@@ -619,8 +661,8 @@ class APIHandler:
             
             def _analyze_single_chapter(i: int, chapter: Dict) -> bool:
                 """内部函数，用于处理单个章节的LLM分析"""
-                safe_title = "".join(c for c in chapter['title'] if c.isalnum() or c in (' ', '_')).rstrip()
-                markdown_filename = f"{i+1:02d}_{safe_title}.md"
+                # 使用与pdf_processor.py和MinerU处理中一致的简单命名规则
+                markdown_filename = f"{i+1:02d}.md"
                 markdown_path = os.path.join(chapters_markdown_dir, markdown_filename)
                 
                 if not os.path.exists(markdown_path):
@@ -640,15 +682,15 @@ class APIHandler:
                     return False
                 
                 try:
-                    analysis_result = self.deepseek_api.analyze_text(markdown_content)
-                    if not analysis_result or 'choices' not in analysis_result:
+                    analysis_result = self.llm_api.analyze_text(markdown_content)
+                    if not analysis_result or 'content' not in analysis_result:
                         if log_callback:
-                            log_callback(f"DeepSeek API返回结果异常")
+                            log_callback(f"{self.llm_api.provider} API返回结果异常")
                         return False
                     
-                    analysis_content = analysis_result['choices'][0]['message']['content']
+                    analysis_content = analysis_result['content']
                     
-                    analysis_filename = f"{i+1:02d}_{safe_title}_analysis.md"
+                    analysis_filename = f"{i+1:02d}_analysis.md"
                     analysis_path = os.path.join(llm_result_dir, analysis_filename)
                     
                     with open(analysis_path, 'w', encoding='utf-8') as f:

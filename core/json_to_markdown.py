@@ -251,12 +251,8 @@ class JSONToMarkdownConverter:
                 chapter_title = chapter.get('title', f'Chapter_{i+1}')
                 start_page = chapter.get('start_page', 1)
                 
-                # 生成章节文件名（与PDF切分时保持一致）
-                safe_title = "".join(c for c in chapter_title if c.isalnum() or c in (' ', '_')).rstrip()
-                if len(safe_title) > 100:
-                    safe_title = safe_title[:100].rstrip()
-                
-                chapter_dir_name = f"{i+1:02d}_{safe_title}"
+                # 使用新的、基于索引的命名规则
+                chapter_dir_name = f"{i+1:02d}"
                 chapter_json_dir = os.path.join(mineru_json_dir, chapter_dir_name)
                 
                 if log_callback:
@@ -288,8 +284,8 @@ class JSONToMarkdownConverter:
                     markdown_content = self.parse_mineru_json_to_markdown(json_file, start_page)
                     
                     if markdown_content:
-                        # 生成输出文件名
-                        output_filename = f"{chapter_dir_name}.md"
+                        # 使用新的、基于索引的命名规则生成输出文件名
+                        output_filename = f"{i+1:02d}.md"
                         output_path = os.path.join(output_markdown_dir, output_filename)
                         
                         # 保存Markdown文件

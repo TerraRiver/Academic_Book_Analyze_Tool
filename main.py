@@ -1,8 +1,18 @@
 import sys
+import os
 import traceback
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from ui.main_window import MainWindow
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 if __name__ == "__main__":
     try:
@@ -19,10 +29,9 @@ if __name__ == "__main__":
                 print(f"Windows 应用程序 ID 设置失败: {e}")
         
         # 设置图标
-        icon_path = "assets/icons/app_icon.ico"
+        icon_path = resource_path("assets/icons/app_icon.ico")
         print(f"尝试加载图标: {icon_path}")
         
-        import os
         if os.path.exists(icon_path):
             print("图标文件存在")
             icon = QIcon(icon_path)

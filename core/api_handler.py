@@ -8,6 +8,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Callable, Optional, Tuple
 from .json_to_markdown import JSONToMarkdownConverter
 
+DEFAULT_MINERU_BASE_URL = "https://mineru.net/api/v4"
+DEFAULT_MINERU_LANGUAGE = "ch"
+MINERU_LANGUAGE_OPTIONS = {"ch", "en", "auto"}
+DEFAULT_MINERU_MODEL_VERSION = "pipeline"
+MINERU_MODEL_VERSION_OPTIONS = {"pipeline", "vlm", "MinerU-HTML"}
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
+DEFAULT_ZENMUX_BASE_URL = "https://zenmux.ai/api/v1"
+DEFAULT_ZENMUX_MODEL_NAME = "google/gemini-3.1-pro-preview"
+
+
+def normalize_mineru_language(language: str) -> str:
+    """兼容历史配置中的zh，并约束为MinerU支持的语言值。"""
+    normalized = (language or DEFAULT_MINERU_LANGUAGE).strip().lower()
+    if normalized == "zh":
+        return DEFAULT_MINERU_LANGUAGE
+    if normalized in MINERU_LANGUAGE_OPTIONS:
+        return normalized
+    return DEFAULT_MINERU_LANGUAGE
+
+
+def normalize_mineru_model_version(model_version: str) -> str:
+    """确保MinerU模型版本始终为官方文档支持的值。"""
+    normalized = (model_version or DEFAULT_MINERU_MODEL_VERSION).strip()
+    if normalized in MINERU_MODEL_VERSION_OPTIONS:
+        return normalized
+    return DEFAULT_MINERU_MODEL_VERSION
+
 
 class ConfigManager:
     """配置管理器，从config.ini读取配置"""
@@ -19,6 +47,7 @@ class ConfigManager:
     
     def load_config(self):
         """加载配置文件"""
+        self.config.clear()
         if os.path.exists(self.config_file):
             self.config.read(self.config_file, encoding='utf-8')
     
@@ -30,11 +59,14 @@ class ConfigManager:
         section = self.config['MinerU']
         return {
             'api_key': section.get('api_key', ''),
-            'base_url': section.get('base_url', 'https://mineru.net/api/v4'),
+            'base_url': section.get('base_url', DEFAULT_MINERU_BASE_URL),
             'enable_ocr': section.getboolean('enable_ocr', True),
             'enable_formula': section.getboolean('enable_formula', True),
             'enable_table': section.getboolean('enable_table', True),
-            'language': section.get('language', 'ch'),
+            'language': normalize_mineru_language(section.get('language', DEFAULT_MINERU_LANGUAGE)),
+            'model_version': normalize_mineru_model_version(
+                section.get('model_version', DEFAULT_MINERU_MODEL_VERSION)
+            ),
             'poll_interval': section.getint('poll_interval', 10),
             'max_attempts': section.getint('max_attempts', 60)
         }
@@ -69,6 +101,8 @@ class ConfigManager:
                 return self._get_default_deepseek_config()
             elif provider == "Gemini":
                 return self._get_default_gemini_config()
+            elif provider == "Zenmux":
+                return self._get_default_zenmux_config()
             return {}
             
         section = self.config[section_name]
@@ -80,11 +114,12 @@ class ConfigManager:
     def _get_default_mineru_config(self) -> Dict:
         return {
             'api_key': '',
-            'base_url': 'https://mineru.net/api/v4',
+            'base_url': DEFAULT_MINERU_BASE_URL,
             'enable_ocr': True,
             'enable_formula': True,
             'enable_table': True,
-            'language': 'zh',
+            'language': DEFAULT_MINERU_LANGUAGE,
+            'model_version': DEFAULT_MINERU_MODEL_VERSION,
             'poll_interval': 10,
             'max_attempts': 60
         }
@@ -92,13 +127,19 @@ class ConfigManager:
     def _get_default_deepseek_config(self) -> Dict:
         return {
             'api_key': '',
-            'base_url': 'https://api.deepseek.com'
+            'base_url': DEFAULT_DEEPSEEK_BASE_URL
         }
 
     def _get_default_gemini_config(self) -> Dict:
         return {
             'api_key': '',
-            'base_url': 'https://generativelanguage.googleapis.com'
+            'base_url': DEFAULT_GEMINI_BASE_URL
+        }
+
+    def _get_default_zenmux_config(self) -> Dict:
+        return {
+            'api_key': '',
+            'base_url': DEFAULT_ZENMUX_BASE_URL
         }
     
     def _get_default_system_prompt(self) -> str:
@@ -144,6 +185,8 @@ class LLMAPI:
                     return self._analyze_with_deepseek(text)
                 elif self.provider == "Gemini":
                     return self._analyze_with_gemini(text)
+                elif self.provider == "Zenmux":
+                    return self._analyze_with_zenmux(text)
                 else:
                     raise NotImplementedError(f"不支持的LLM提供商: {self.provider}")
             except requests.exceptions.RequestException as e:
@@ -156,9 +199,23 @@ class LLMAPI:
                     else:
                         raise Exception(f"{self.provider} API请求在 {max_retries} 次尝试后仍然失败: {e}")
                 else:
-                    # 对于其他客户端错误或网络问题，直接抛出异常
-                    raise e
+                    # 对于客户端错误，尽量附带响应体，便于定位模型权限或鉴权问题
+                    raise Exception(self._format_request_exception(e))
         return None # 如果循环结束仍未成功，理论上不会执行到这里
+
+    def _format_request_exception(self, error: requests.exceptions.RequestException) -> str:
+        """为HTTP异常补充状态码和响应体摘要，便于排查供应商错误。"""
+        response = getattr(error, 'response', None)
+        if response is None:
+            return str(error)
+
+        response_preview = response.text.strip()
+        if len(response_preview) > 500:
+            response_preview = response_preview[:500] + "..."
+
+        if response_preview:
+            return f"{response.status_code} {response.reason}: {response_preview}"
+        return f"{response.status_code} {response.reason}: {error}"
 
     def _analyze_with_deepseek(self, text: str) -> Optional[Dict]:
         """使用DeepSeek API分析"""
@@ -201,9 +258,33 @@ class LLMAPI:
         result = response.json()
         return {'content': result['candidates'][0]['content']['parts'][0]['text']}
 
+    def _analyze_with_zenmux(self, text: str) -> Optional[Dict]:
+        """使用Zenmux OpenAI兼容接口分析。"""
+        url = f"{self.provider_config['base_url']}/chat/completions"
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f"Bearer {self.provider_config['api_key']}"
+        }
+        payload = {
+            "model": self.llm_config['model_name'] or DEFAULT_ZENMUX_MODEL_NAME,
+            "messages": [
+                {"role": "system", "content": self.llm_config['prompt']},
+                {"role": "user", "content": text}
+            ],
+            "temperature": self.llm_config['temperature'],
+            "max_completion_tokens": self.llm_config['max_tokens']
+        }
+
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+        result = response.json()
+        return {'content': result['choices'][0]['message']['content']}
+
 
 class MinerUAPI:
     """MinerU API调用处理器"""
+
+    MAX_FILES_PER_BATCH = 200
     
     def __init__(self, config_manager: ConfigManager):
         self.config_manager = config_manager
@@ -241,17 +322,36 @@ class MinerUAPI:
             return {}
         
         if log_callback:
-            log_callback(f"开始处理 {len(chapter_files)} 个章节文件...")
+            log_callback(
+                f"开始处理 {len(chapter_files)} 个章节文件，MinerU模型版本: "
+                f"{self.mineru_config['model_version']}"
+            )
                 
         try:
-            # 步骤1: 申请上传链接
-            batch_id, upload_urls = self._request_upload_urls(chapter_files, log_callback)
-            
-            # 步骤2: 上传文件
-            self._upload_files(chapter_files, upload_urls, log_callback)
-            
-            # 步骤3: 轮询结果
-            results = self._poll_results(batch_id, status_callback, log_callback)
+            results = {}
+            chapter_file_batches = self._split_batches(chapter_files, self.MAX_FILES_PER_BATCH)
+
+            if len(chapter_file_batches) > 1 and log_callback:
+                log_callback(
+                    f"根据MinerU官方限制，已拆分为 {len(chapter_file_batches)} 个批次提交。"
+                )
+
+            for batch_index, batch_files in enumerate(chapter_file_batches, start=1):
+                if log_callback:
+                    log_callback(
+                        f"开始处理第 {batch_index}/{len(chapter_file_batches)} 批，"
+                        f"共 {len(batch_files)} 个文件。"
+                    )
+
+                # 步骤1: 申请上传链接
+                batch_id, upload_urls = self._request_upload_urls(batch_files, log_callback)
+                
+                # 步骤2: 上传文件
+                self._upload_files(batch_files, upload_urls, log_callback)
+                
+                # 步骤3: 轮询结果
+                batch_results = self._poll_results(batch_id, status_callback, log_callback)
+                results.update(batch_results)
             
             if log_callback:
                 log_callback(f"所有章节处理完成！共处理 {len(results)} 个文件")
@@ -263,6 +363,11 @@ class MinerUAPI:
             if log_callback:
                 log_callback(error_msg)
             return {}
+
+    @staticmethod
+    def _split_batches(items: List[str], batch_size: int) -> List[List[str]]:
+        """将文件列表切分为符合官方上限的多个批次。"""
+        return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
     
     def _request_upload_urls(self, file_paths: List[str], 
                            log_callback: Optional[Callable] = None) -> Tuple[str, List[str]]:
@@ -291,6 +396,7 @@ class MinerUAPI:
             "enable_formula": self.mineru_config['enable_formula'],
             "language": self.mineru_config['language'],
             "enable_table": self.mineru_config['enable_table'],
+            "model_version": self.mineru_config['model_version'],
             "files": files_payload
         }
         
@@ -430,7 +536,12 @@ class MinerUAPI:
                             pass  # 忽略回调错误
                     
                     if log_callback:
-                        status_summary = ", ".join(f"{k}: {v}" for k, v in current_statuses.items())
+                        state_counts = {}
+                        for state in current_statuses.values():
+                            state_counts[state] = state_counts.get(state, 0) + 1
+                        status_summary = ", ".join(
+                            f"{state}={count}" for state, count in sorted(state_counts.items())
+                        )
                         log_callback(f"当前状态: {status_summary}")
                     
                     time.sleep(poll_interval)
@@ -514,10 +625,22 @@ class APIHandler:
     
     def __init__(self):
         self.config_manager = ConfigManager()
-        self.mineru_api = MinerUAPI(self.config_manager)
-        self.llm_api = LLMAPI(self.config_manager)
+        self.mineru_api = None
+        self.llm_api = None
         self.content_extractor = ContentExtractor()
         self.json_to_markdown = JSONToMarkdownConverter()
+
+    def refresh_clients(self):
+        """在每次处理前重新加载配置，避免要求重启应用。"""
+        self.config_manager.load_config()
+        self.mineru_api = MinerUAPI(self.config_manager)
+        self.llm_api = None
+
+    def get_llm_api(self) -> LLMAPI:
+        """延迟初始化LLM客户端，避免首启时因未配置Key而崩溃。"""
+        if self.llm_api is None:
+            self.llm_api = LLMAPI(self.config_manager)
+        return self.llm_api
     
     def process_book_chapters(self, book_path: str, chapters: List[Dict],
                             status_callback: Optional[Callable] = None,
@@ -535,6 +658,8 @@ class APIHandler:
             是否处理成功
         """
         try:
+            self.refresh_clients()
+
             # 获取章节PDF文件路径
             chapters_pdf_dir = os.path.join(book_path, "chapters_pdf")
             if not os.path.exists(chapters_pdf_dir):
@@ -640,6 +765,9 @@ class APIHandler:
             是否处理成功
         """
         try:
+            self.refresh_clients()
+            llm_api = self.get_llm_api()
+
             # 获取章节Markdown文件路径
             chapters_markdown_dir = os.path.join(book_path, "chapters_markdown")
             if not os.path.exists(chapters_markdown_dir):
@@ -682,10 +810,10 @@ class APIHandler:
                     return False
                 
                 try:
-                    analysis_result = self.llm_api.analyze_text(markdown_content)
+                    analysis_result = llm_api.analyze_text(markdown_content)
                     if not analysis_result or 'content' not in analysis_result:
                         if log_callback:
-                            log_callback(f"{self.llm_api.provider} API返回结果异常")
+                            log_callback(f"{llm_api.provider} API返回结果异常")
                         return False
                     
                     analysis_content = analysis_result['content']

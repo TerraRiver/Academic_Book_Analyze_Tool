@@ -42,11 +42,14 @@ class MinerUWorker(QThread):
         super().__init__()
         self.book_path = book_path
         self.chapters = chapters
-        self.api_handler = APIHandler()
+        self.api_handler = None
     
     def run(self):
         """在后台线程中执行MinerU处理"""
         try:
+            if self.api_handler is None:
+                self.api_handler = APIHandler()
+
             def log_callback(message):
                 self.log_message.emit(message)
             
@@ -72,11 +75,14 @@ class LLMAnalysisWorker(QThread):
         super().__init__()
         self.book_path = book_path
         self.chapters = chapters
-        self.api_handler = APIHandler()
+        self.api_handler = None
     
     def run(self):
         """在后台线程中执行LLM分析"""
         try:
+            if self.api_handler is None:
+                self.api_handler = APIHandler()
+
             def log_callback(message):
                 self.log_message.emit(message)
             
@@ -133,11 +139,14 @@ class FullProcessWorker(QThread):
         self.book_path = book_path
         self.chapters = chapters
         self.book_manager = BookManager()
-        self.api_handler = APIHandler()
+        self.api_handler = None
 
     def run(self):
         """在后台线程中按顺序执行完整处理流程"""
         try:
+            if self.api_handler is None:
+                self.api_handler = APIHandler()
+
             # 0. Helper for logging
             def log_callback(message):
                 self.log_message.emit(message)
@@ -630,10 +639,11 @@ class MainWindow(QMainWindow):
                 border: 1px solid #81e6d9;
             }
 
-            QTreeWidget, QTableWidget {
+            QTreeWidget, QTableWidget, QTreeView, QTableView {
                 border: 2px solid #e2e8f0;
                 border-radius: 8px;
                 background-color: #ffffff;
+                color: #1a202c;
                 selection-background-color: #e6fffa;
                 selection-color: #1a202c;
                 font-size: 13px;
@@ -643,15 +653,25 @@ class MainWindow(QMainWindow):
                 padding: 12px 8px;
                 border-bottom: 1px solid #f7fafc;
                 min-height: 40px;
+                color: #1a202c;
+                background-color: #ffffff;
             }
             QTreeWidget::item:hover, QTableWidget::item:hover {
                 background-color: #f0fff4;
+                color: #1a202c;
             }
             QTreeWidget::item:selected, QTableWidget::item:selected {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #e6fffa, stop:1 #b2f5ea);
                 color: #1a202c;
                 border: none;
+            }
+            QTableCornerButton::section {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #edf2f7, stop:1 #e2e8f0);
+                border: none;
+                border-right: 1px solid #cbd5e0;
+                border-bottom: 2px solid #cbd5e0;
             }
             QTreeWidget::branch:selected {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -695,6 +715,79 @@ class MainWindow(QMainWindow):
                 border-top: 5px solid #4a5568;
                 width: 0;
                 height: 0;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #ffffff;
+                color: #1a202c;
+                border: 1px solid #e2e8f0;
+                selection-background-color: #e6fffa;
+                selection-color: #1a202c;
+                outline: 0;
+                padding: 4px;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 28px;
+                padding: 6px 10px;
+                color: #1a202c;
+                background-color: #ffffff;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #b2f5ea;
+                color: #1a202c;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #edf2f7;
+                color: #1a202c;
+            }
+
+            QLineEdit, QTextEdit, QAbstractSpinBox {
+                background-color: #ffffff;
+                color: #1a202c;
+                border: 2px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-size: 13px;
+                selection-background-color: #c6f6d5;
+                selection-color: #1a202c;
+            }
+            QLineEdit:hover, QTextEdit:hover, QAbstractSpinBox:hover {
+                border-color: #cbd5e0;
+            }
+            QLineEdit:focus, QTextEdit:focus, QAbstractSpinBox:focus {
+                border-color: #667eea;
+                color: #1a202c;
+            }
+
+            QTabWidget::pane {
+                background-color: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                margin-top: 8px;
+            }
+            QTabBar::tab {
+                background: #edf2f7;
+                color: #2d3748;
+                padding: 10px 18px;
+                margin-right: 6px;
+                border: 1px solid #e2e8f0;
+                border-bottom: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #1a202c;
+                border-color: #cbd5e0;
+            }
+            QTabBar::tab:!selected {
+                background: #edf2f7;
+                color: #4a5568;
+            }
+            QTabBar::tab:hover {
+                background: #e2e8f0;
+                color: #1a202c;
             }
 
             #log_text_edit {
@@ -968,10 +1061,6 @@ class MainWindow(QMainWindow):
                 if success:
                     success_count += 1
                     formatted_title = result
-                    # 创建初始元数据
-                    new_book_path = os.path.join(self.book_manager.data_path, selected_group, formatted_title)
-                    initial_metadata = {"status": "未处理", "chapters": []}
-                    self.book_manager.save_book_metadata(new_book_path, initial_metadata)
                     self.log_message(f"成功上传书籍: {formatted_title}")
                 else:
                     error_messages.append(f"上传 {os.path.basename(file_path)} 失败: {result}")

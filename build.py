@@ -17,8 +17,12 @@ def build_exe():
     """构建exe文件"""
     print("开始构建exe...")
     
-    # 使用spec文件构建
-    cmd = ['pyinstaller', '--clean', 'build_config.spec']
+    if shutil.which("uv") is None:
+        print("未找到 uv，请先安装 uv 后再执行构建。")
+        return False
+
+    # 使用 uv 管理构建依赖，并通过 build 依赖组运行 PyInstaller
+    cmd = ['uv', 'run', '--group', 'build', 'pyinstaller', '--clean', 'build_config.spec']
     
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)

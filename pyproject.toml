@@ -1,0 +1,19 @@
+[project]
+name = "tr-book-read-tool"
+version = "0.1.0"
+description = "按章节处理 PDF 并生成大模型分析报告的桌面工具"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6",
+    "pypdf",
+    "requests",
+    "python-docx",
+]
+
+[dependency-groups]
+build = [
+    "pyinstaller",
+]
+
+[tool.uv]
+package = false

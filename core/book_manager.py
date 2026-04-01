@@ -11,11 +11,17 @@ class BookManager:
     def __init__(self, data_dir: str = "data"):
         self.data_path = data_dir
         self.data_dir = data_dir  # 保持兼容性
-        self.api_handler = APIHandler()
+        self.api_handler = None
         
         # 确保数据目录存在
         if not os.path.exists(self.data_path):
             os.makedirs(self.data_path)
+
+    def _get_api_handler(self) -> APIHandler:
+        """延迟初始化API处理器，避免首次启动时因缺少Key而报错。"""
+        if self.api_handler is None:
+            self.api_handler = APIHandler()
+        return self.api_handler
     
     def scan_book_groups(self) -> List[str]:
         """扫描所有书籍组"""
@@ -130,8 +136,16 @@ class BookManager:
         """保存书籍元数据"""
         metadata_path = os.path.join(book_path, "metadata.json")
         try:
+            existing_metadata = {}
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    existing_metadata = json.load(f)
+
+            merged_metadata = existing_metadata.copy()
+            merged_metadata.update(metadata)
+
             with open(metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, ensure_ascii=False, indent=2)
+                json.dump(merged_metadata, f, ensure_ascii=False, indent=2)
             return True
         except Exception:
             return False
@@ -168,7 +182,7 @@ class BookManager:
                             log_callback: Optional[callable] = None) -> bool:
         """处理书籍章节(MinerU解析)"""
         chapters = self.get_book_chapters(book_path)
-        return self.api_handler.process_book_chapters(
+        return self._get_api_handler().process_book_chapters(
             book_path, chapters, status_callback, log_callback
         )
     
@@ -177,7 +191,7 @@ class BookManager:
                             log_callback: Optional[callable] = None) -> bool:
         """分析书籍章节(LLM解析)"""
         chapters = self.get_book_chapters(book_path)
-        return self.api_handler.analyze_chapters(
+        return self._get_api_handler().analyze_chapters(
             book_path, chapters, status_callback, log_callback
         )
     

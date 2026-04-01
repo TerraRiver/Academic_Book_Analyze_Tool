@@ -22,6 +22,40 @@ from PySide6.QtWidgets import (
     QFileDialog
 )
 
+DEFAULT_MINERU_BASE_URL = "https://mineru.net/api/v4"
+DEFAULT_MINERU_LANGUAGE = "ch"
+MINERU_LANGUAGE_OPTIONS = ["ch", "en", "auto"]
+DEFAULT_MINERU_MODEL_VERSION = "pipeline"
+MINERU_MODEL_VERSION_OPTIONS = ["pipeline", "vlm", "MinerU-HTML"]
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
+DEFAULT_ZENMUX_BASE_URL = "https://zenmux.ai/api/v1"
+DEFAULT_ZENMUX_MODEL_NAME = "google/gemini-3.1-pro-preview"
+ZENMUX_MODEL_OPTIONS = [
+    "google/gemini-3.1-pro-preview",
+    "google/gemini-2.5-pro",
+    "google/gemini-2.5-flash",
+    "openai/gpt-5.2",
+]
+
+
+def normalize_mineru_language(language: str) -> str:
+    """兼容旧配置中的zh值。"""
+    normalized = (language or DEFAULT_MINERU_LANGUAGE).strip().lower()
+    if normalized == "zh":
+        return DEFAULT_MINERU_LANGUAGE
+    if normalized in MINERU_LANGUAGE_OPTIONS:
+        return normalized
+    return DEFAULT_MINERU_LANGUAGE
+
+
+def normalize_mineru_model_version(model_version: str) -> str:
+    """兼容空值或历史配置中的无效模型版本。"""
+    normalized = (model_version or DEFAULT_MINERU_MODEL_VERSION).strip()
+    if normalized in MINERU_MODEL_VERSION_OPTIONS:
+        return normalized
+    return DEFAULT_MINERU_MODEL_VERSION
+
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -34,6 +68,7 @@ class SettingsDialog(QDialog):
         self.config = configparser.ConfigParser()
         
         self.init_ui()
+        self.setup_styles()
         self.load_settings()
         
     def init_ui(self):
@@ -71,6 +106,174 @@ class SettingsDialog(QDialog):
         button_layout.addWidget(self.cancel_button)
         
         layout.addLayout(button_layout)
+
+    def setup_styles(self):
+        """设置对话框专用样式，避免受主窗口全局样式影响。"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f8fafc;
+                color: #1a202c;
+            }
+
+            QLabel {
+                color: #2d3748;
+                font-size: 13px;
+                font-weight: 600;
+            }
+
+            QTabWidget::pane {
+                background-color: #ffffff;
+                border: 1px solid #d9e2ec;
+                border-radius: 12px;
+                margin-top: 8px;
+            }
+            QTabBar::tab {
+                background-color: #e9eef5;
+                color: #4a5568;
+                border: 1px solid #d9e2ec;
+                border-bottom: none;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                padding: 10px 18px;
+                margin-right: 6px;
+                min-width: 96px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QTabBar::tab:selected {
+                background-color: #ffffff;
+                color: #1a202c;
+            }
+            QTabBar::tab:hover {
+                background-color: #dde6f0;
+                color: #1a202c;
+            }
+
+            QGroupBox {
+                background-color: #ffffff;
+                color: #1a202c;
+                border: 1px solid #d9e2ec;
+                border-radius: 12px;
+                margin-top: 12px;
+                padding: 16px 14px 14px 14px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #2d3748;
+                background-color: #f8fafc;
+            }
+
+            QLineEdit, QTextEdit, QComboBox, QAbstractSpinBox {
+                background-color: #ffffff;
+                color: #1a202c;
+                border: 1px solid #cbd5e0;
+                border-radius: 10px;
+                padding: 8px 12px;
+                font-size: 13px;
+                selection-background-color: #bee3f8;
+                selection-color: #1a202c;
+            }
+            QLineEdit:hover, QTextEdit:hover, QComboBox:hover, QAbstractSpinBox:hover {
+                border-color: #a0aec0;
+            }
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {
+                border-color: #3182ce;
+            }
+            QTextEdit {
+                background-color: #fcfdff;
+            }
+
+            QComboBox {
+                padding-right: 32px;
+                min-height: 20px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 26px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0;
+                height: 0;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #4a5568;
+                margin-right: 10px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #ffffff;
+                color: #1a202c;
+                border: 1px solid #d9e2ec;
+                border-radius: 8px;
+                padding: 4px;
+                selection-background-color: #d9f3ee;
+                selection-color: #1a202c;
+                outline: 0;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 28px;
+                padding: 6px 10px;
+                color: #1a202c;
+                background-color: #ffffff;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #edf2f7;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #bfeee2;
+                color: #1a202c;
+            }
+
+            QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
+                width: 18px;
+                border: none;
+                background: transparent;
+            }
+
+            QCheckBox {
+                color: #2d3748;
+                spacing: 8px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 1px solid #a0aec0;
+                border-radius: 5px;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #319795;
+                border-color: #319795;
+            }
+
+            QPushButton {
+                background-color: #2b6cb0;
+                color: #ffffff;
+                border: none;
+                border-radius: 10px;
+                padding: 10px 18px;
+                font-size: 13px;
+                font-weight: 600;
+                min-height: 18px;
+            }
+            QPushButton:hover {
+                background-color: #2c5282;
+            }
+            QPushButton:pressed {
+                background-color: #1a365d;
+            }
+
+            QMessageBox {
+                background-color: #ffffff;
+                color: #1a202c;
+            }
+        """)
     
     def create_mineru_tab(self):
         """创建MinerU设置标签页"""
@@ -87,8 +290,8 @@ class SettingsDialog(QDialog):
         api_layout.addRow("API Key:", self.mineru_api_key)
         
         self.mineru_base_url = QLineEdit()
-        self.mineru_base_url.setPlaceholderText("https://api.mineru.com")
-        self.mineru_base_url.setText("https://api.mineru.com")
+        self.mineru_base_url.setPlaceholderText(DEFAULT_MINERU_BASE_URL)
+        self.mineru_base_url.setText(DEFAULT_MINERU_BASE_URL)
         api_layout.addRow("Base URL:", self.mineru_base_url)
         
         layout.addWidget(api_group)
@@ -110,9 +313,15 @@ class SettingsDialog(QDialog):
         options_layout.addRow("表格识别:", self.enable_table)
         
         self.language = QComboBox()
-        self.language.addItems(["ch", "en", "auto"])
-        self.language.setCurrentText("ch")
+        self.language.addItems(MINERU_LANGUAGE_OPTIONS)
+        self.language.setCurrentText(DEFAULT_MINERU_LANGUAGE)
         options_layout.addRow("文档语言:", self.language)
+
+        self.model_version = QComboBox()
+        self.model_version.addItems(MINERU_MODEL_VERSION_OPTIONS)
+        self.model_version.setCurrentText(DEFAULT_MINERU_MODEL_VERSION)
+        self.model_version.setToolTip("PDF 推荐使用 pipeline 或 vlm；HTML 文件需使用 MinerU-HTML")
+        options_layout.addRow("模型版本:", self.model_version)
         
         layout.addWidget(options_group)
         
@@ -147,7 +356,7 @@ class SettingsDialog(QDialog):
         provider_layout = QFormLayout(provider_group)
 
         self.llm_provider_combo = QComboBox()
-        self.llm_provider_combo.addItems(["DeepSeek", "Gemini"])
+        self.llm_provider_combo.addItems(["DeepSeek", "Gemini", "Zenmux"])
         self.llm_provider_combo.currentTextChanged.connect(self._on_llm_provider_changed)
         provider_layout.addRow("选择模型提供商:", self.llm_provider_combo)
 
@@ -164,6 +373,13 @@ class SettingsDialog(QDialog):
         self.gemini_api_key.setEchoMode(QLineEdit.Password)
         self.gemini_api_key.setPlaceholderText("请输入Gemini API Key")
         provider_layout.addRow(self.gemini_api_key_label, self.gemini_api_key)
+
+        # Zenmux API Key (initially hidden)
+        self.zenmux_api_key_label = QLabel("Zenmux API Key:")
+        self.zenmux_api_key = QLineEdit()
+        self.zenmux_api_key.setEchoMode(QLineEdit.Password)
+        self.zenmux_api_key.setPlaceholderText("请输入Zenmux API Key")
+        provider_layout.addRow(self.zenmux_api_key_label, self.zenmux_api_key)
 
         self.llm_base_url = QLineEdit()
         self.llm_base_url.setPlaceholderText("将根据模型提供商自动填充")
@@ -265,23 +481,32 @@ class SettingsDialog(QDialog):
         """当LLM提供商变化时更新UI"""
         is_deepseek = provider == "DeepSeek"
         is_gemini = provider == "Gemini"
+        is_zenmux = provider == "Zenmux"
 
         # 控制API Key输入框的可见性
         self.deepseek_api_key_label.setVisible(is_deepseek)
         self.deepseek_api_key.setVisible(is_deepseek)
         self.gemini_api_key_label.setVisible(is_gemini)
         self.gemini_api_key.setVisible(is_gemini)
+        self.zenmux_api_key_label.setVisible(is_zenmux)
+        self.zenmux_api_key.setVisible(is_zenmux)
 
         # 更新URL和模型列表
         self.llm_model_name.clear()
         if is_deepseek:
-            self.llm_base_url.setText(self.config.get('DeepSeek', 'base_url', fallback='https://api.deepseek.com'))
+            self.llm_base_url.setText(self.config.get('DeepSeek', 'base_url', fallback=DEFAULT_DEEPSEEK_BASE_URL))
             self.llm_model_name.addItems(["deepseek-chat"])
             self.llm_model_name.setCurrentText(self.config.get('LLM', 'model_name', fallback='deepseek-chat'))
         elif is_gemini:
-            self.llm_base_url.setText(self.config.get('Gemini', 'base_url', fallback='https://generativelanguage.googleapis.com'))
+            self.llm_base_url.setText(self.config.get('Gemini', 'base_url', fallback=DEFAULT_GEMINI_BASE_URL))
             self.llm_model_name.addItems(["gemini-2.5-pro","gemini-2.5-flash"])
             self.llm_model_name.setCurrentText(self.config.get('LLM', 'model_name', fallback='gemini-2.5-flash'))
+        elif is_zenmux:
+            self.llm_base_url.setText(self.config.get('Zenmux', 'base_url', fallback=DEFAULT_ZENMUX_BASE_URL))
+            self.llm_model_name.addItems(ZENMUX_MODEL_OPTIONS)
+            self.llm_model_name.setCurrentText(
+                self.config.get('LLM', 'model_name', fallback=DEFAULT_ZENMUX_MODEL_NAME)
+            )
     
     def load_settings(self):
         """从配置文件加载设置"""
@@ -300,17 +525,25 @@ class SettingsDialog(QDialog):
         if self.config.has_section('MinerU'):
             mineru_section = self.config['MinerU']
             self.mineru_api_key.setText(mineru_section.get('api_key', ''))
-            self.mineru_base_url.setText(mineru_section.get('base_url', 'https://api.mineru.com'))
+            self.mineru_base_url.setText(mineru_section.get('base_url', DEFAULT_MINERU_BASE_URL))
             self.enable_ocr.setChecked(mineru_section.getboolean('enable_ocr', True))
             self.enable_formula.setChecked(mineru_section.getboolean('enable_formula', True))
             self.enable_table.setChecked(mineru_section.getboolean('enable_table', True))
-            self.language.setCurrentText(mineru_section.get('language', 'zh'))
+            self.language.setCurrentText(
+                normalize_mineru_language(mineru_section.get('language', DEFAULT_MINERU_LANGUAGE))
+            )
+            self.model_version.setCurrentText(
+                normalize_mineru_model_version(
+                    mineru_section.get('model_version', DEFAULT_MINERU_MODEL_VERSION)
+                )
+            )
             self.poll_interval.setValue(mineru_section.getint('poll_interval', 10))
             self.max_attempts.setValue(mineru_section.getint('max_attempts', 60))
         
         # 加载LLM提供商的独立设置
         self.deepseek_api_key.setText(self.config.get('DeepSeek', 'api_key', fallback=''))
         self.gemini_api_key.setText(self.config.get('Gemini', 'api_key', fallback=''))
+        self.zenmux_api_key.setText(self.config.get('Zenmux', 'api_key', fallback=''))
 
         # 加载LLM通用设置
         if self.config.has_section('LLM'):
@@ -335,7 +568,7 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         """保存设置到配置文件"""
         # 确保配置文件有必要的节
-        for section in ['General', 'MinerU', 'DeepSeek', 'Gemini', 'LLM']:
+        for section in ['General', 'MinerU', 'DeepSeek', 'Gemini', 'Zenmux', 'LLM']:
             if not self.config.has_section(section):
                 self.config.add_section(section)
 
@@ -344,25 +577,29 @@ class SettingsDialog(QDialog):
         
         # 保存MinerU设置
         mineru_section = self.config['MinerU']
-        mineru_section['api_key'] = self.mineru_api_key.text()
-        mineru_section['base_url'] = self.mineru_base_url.text()
+        mineru_section['api_key'] = self.mineru_api_key.text().strip()
+        mineru_section['base_url'] = self.mineru_base_url.text().strip() or DEFAULT_MINERU_BASE_URL
         mineru_section['enable_ocr'] = str(self.enable_ocr.isChecked())
         mineru_section['enable_formula'] = str(self.enable_formula.isChecked())
         mineru_section['enable_table'] = str(self.enable_table.isChecked())
-        mineru_section['language'] = self.language.currentText()
+        mineru_section['language'] = normalize_mineru_language(self.language.currentText())
+        mineru_section['model_version'] = normalize_mineru_model_version(self.model_version.currentText())
         mineru_section['poll_interval'] = str(self.poll_interval.value())
         mineru_section['max_attempts'] = str(self.max_attempts.value())
         
         # 保存各个LLM提供商的设置
-        self.config['DeepSeek']['api_key'] = self.deepseek_api_key.text()
-        self.config['Gemini']['api_key'] = self.gemini_api_key.text()
+        self.config['DeepSeek']['api_key'] = self.deepseek_api_key.text().strip()
+        self.config['Gemini']['api_key'] = self.gemini_api_key.text().strip()
+        self.config['Zenmux']['api_key'] = self.zenmux_api_key.text().strip()
         
         # 根据当前选择保存URL
         provider = self.llm_provider_combo.currentText()
         if provider == "DeepSeek":
-            self.config['DeepSeek']['base_url'] = self.llm_base_url.text()
+            self.config['DeepSeek']['base_url'] = self.llm_base_url.text().strip() or DEFAULT_DEEPSEEK_BASE_URL
         elif provider == "Gemini":
-            self.config['Gemini']['base_url'] = self.llm_base_url.text()
+            self.config['Gemini']['base_url'] = self.llm_base_url.text().strip() or DEFAULT_GEMINI_BASE_URL
+        elif provider == "Zenmux":
+            self.config['Zenmux']['base_url'] = self.llm_base_url.text().strip() or DEFAULT_ZENMUX_BASE_URL
 
         # 保存LLM通用设置
         llm_section = self.config['LLM']
@@ -396,6 +633,7 @@ class SettingsDialog(QDialog):
             'enable_formula': self.enable_formula.isChecked(),
             'enable_table': self.enable_table.isChecked(),
             'language': self.language.currentText(),
+            'model_version': self.model_version.currentText(),
             'poll_interval': self.poll_interval.value(),
             'max_attempts': self.max_attempts.value()
         }
@@ -404,8 +642,8 @@ class SettingsDialog(QDialog):
         """获取DeepSeek配置"""
         return {
             'api_key': self.deepseek_api_key.text(),
-            'base_url': self.deepseek_base_url.text(),
-            'model_name': self.model_name.currentText(),
+            'base_url': self.llm_base_url.text(),
+            'model_name': self.llm_model_name.currentText(),
             'temperature': self.temperature.value(),
             'max_tokens': self.max_tokens.value()
         }

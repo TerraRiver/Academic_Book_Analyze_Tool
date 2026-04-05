@@ -204,6 +204,113 @@ class FullProcessWorker(QThread):
                 self.finished.emit(False, error_message)
 
 
+class PDFParseWorker(QThread):
+    """PDF解析工作线程（章节切分 + MinerU解析 + JSON转Markdown）"""
+    finished = Signal(bool, str)
+    log_message = Signal(str)
+    progress_update = Signal(str, int)
+
+    def __init__(self, book_path, chapters):
+        super().__init__()
+        self.book_path = book_path
+        self.chapters = chapters
+        self.api_handler = None
+
+    def run(self):
+        try:
+            if self.api_handler is None:
+                self.api_handler = APIHandler()
+
+            def log_callback(message):
+                self.log_message.emit(message)
+
+            # 1. 章节切分
+            if self.isInterruptionRequested(): return
+            self.progress_update.emit("章节切分", 10)
+            log_callback("开始章节切分...")
+            original_pdf_path = os.path.join(self.book_path, "original.pdf")
+            chapters_pdf_dir = os.path.join(self.book_path, "chapters_pdf")
+            from core.pdf_processor import split_pdf_by_chapters
+            success, msg = split_pdf_by_chapters(original_pdf_path, self.chapters, chapters_pdf_dir)
+            if not success:
+                raise Exception(f"章节切分失败: {msg}")
+            log_callback("章节切分完成。")
+            self.progress_update.emit("章节切分", 30)
+
+            # 2. MinerU解析 + JSON转Markdown
+            if self.isInterruptionRequested(): return
+            self.progress_update.emit("MinerU解析", 35)
+            log_callback("开始MinerU解析...")
+            success = self.api_handler.process_book_chapters(
+                self.book_path, self.chapters, log_callback=log_callback
+            )
+            if not success:
+                raise Exception("MinerU解析失败。")
+            log_callback("MinerU解析完成。")
+            self.progress_update.emit("PDF解析完成", 100)
+
+            self.finished.emit(True, "PDF解析完成！Markdown文件已生成，可进行LLM分析。")
+
+        except Exception as e:
+            if not self.isInterruptionRequested():
+                error_message = f"PDF解析流程中发生错误：{str(e)}"
+                self.log_message.emit(error_message)
+                self.finished.emit(False, error_message)
+
+
+class LLMWithReportWorker(QThread):
+    """LLM分析 + 生成Word报告工作线程"""
+    finished = Signal(bool, str)
+    log_message = Signal(str)
+    progress_update = Signal(str, int)
+
+    def __init__(self, book_path, chapters):
+        super().__init__()
+        self.book_path = book_path
+        self.chapters = chapters
+        self.api_handler = None
+        self.book_manager = BookManager()
+
+    def run(self):
+        try:
+            if self.api_handler is None:
+                self.api_handler = APIHandler()
+
+            def log_callback(message):
+                self.log_message.emit(message)
+
+            # 1. LLM分析
+            if self.isInterruptionRequested(): return
+            self.progress_update.emit("LLM分析", 10)
+            log_callback("开始LLM分析...")
+            success = self.api_handler.analyze_chapters(
+                self.book_path, self.chapters, log_callback=log_callback
+            )
+            if not success:
+                raise Exception("LLM分析失败。")
+            log_callback("LLM分析完成。")
+            self.progress_update.emit("生成Word报告", 80)
+
+            # 2. 生成Word报告
+            if self.isInterruptionRequested(): return
+            log_callback("开始生成Word报告...")
+            report_path = self.book_manager.generate_book_report(
+                self.book_path, log_callback=log_callback
+            )
+            if not report_path:
+                raise Exception("生成Word报告失败。")
+            log_callback(f"Word报告生成完成！路径：{report_path}")
+            self.progress_update.emit("分析完成", 100)
+
+            self.finished.emit(True, f"LLM分析完成！报告已生成于：\n{report_path}")
+
+        except Exception as e:
+            if not self.isInterruptionRequested():
+                error_message = f"LLM分析流程中发生错误：{str(e)}"
+                self.log_message.emit(error_message)
+                self.finished.emit(False, error_message)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -217,6 +324,10 @@ class MainWindow(QMainWindow):
         self.report_worker = None
         self.full_process_worker = None
         self.processing_animation = None
+        self.pdf_parse_worker = None
+        self.llm_report_worker = None
+        self._active_processing_button = None
+        self._active_processing_button_original_text = None
 
         # 创建菜单栏
         self.create_menu_bar()
@@ -347,13 +458,30 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.save_chapters_button)
         book_detail_layout.addLayout(button_layout)
 
-        # 添加“开始处理”按钮
+        # 处理按钮区（三个阶段按钮）
         process_layout = QHBoxLayout()
-        self.start_processing_button = QPushButton("开始处理(保存章节后可点击)")
-        self.start_processing_button.setIcon(QIcon("assets/icons/start.png")) # 假设有这个图标
-        self.start_processing_button.clicked.connect(self.start_full_process)
-        self.start_processing_button.setEnabled(False)
-        process_layout.addWidget(self.start_processing_button)
+        process_layout.setSpacing(8)
+
+        self.pdf_parse_button = QPushButton("PDF解析")
+        self.pdf_parse_button.setIcon(QIcon("assets/icons/start.png"))
+        self.pdf_parse_button.setToolTip("章节切分 → MinerU解析 → JSON转Markdown")
+        self.pdf_parse_button.clicked.connect(self.start_pdf_parse)
+        self.pdf_parse_button.setEnabled(False)
+
+        self.llm_analyze_button = QPushButton("LLM分析")
+        self.llm_analyze_button.setToolTip("LLM分析 → 生成Word报告（需先完成PDF解析）")
+        self.llm_analyze_button.clicked.connect(self.start_llm_analyze)
+        self.llm_analyze_button.setEnabled(False)
+
+        self.full_process_button = QPushButton("全流程处理")
+        self.full_process_button.setIcon(QIcon("assets/icons/start.png"))
+        self.full_process_button.setToolTip("章节切分 → MinerU解析 → LLM分析 → 生成Word报告")
+        self.full_process_button.clicked.connect(self.start_full_process)
+        self.full_process_button.setEnabled(False)
+
+        process_layout.addWidget(self.pdf_parse_button)
+        process_layout.addWidget(self.llm_analyze_button)
+        process_layout.addWidget(self.full_process_button)
         book_detail_layout.addLayout(process_layout)
         self.central_stacked_widget.addWidget(self.book_detail_page)
 
@@ -398,86 +526,39 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "错误", "请先选择一本书")
             return
 
-        # 确认操作
-        reply = QMessageBox.question(self, "确认处理", 
-                                   f"确定要开始完整的处理流程吗？\n这将依次执行：\n1. 章节切分\n2. MinerU解析\n3. LLM分析\n4. 生成Word报告\n\n此过程可能需要很长时间。",
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.question(self, "确认处理",
+                                     "确定要开始完整的处理流程吗？\n依次执行：\n1. 章节切分\n2. MinerU解析\n3. LLM分析\n4. 生成Word报告\n\n此过程可能需要很长时间。",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
 
-        # 禁用按钮并开始动画
-        self.start_processing_button.setEnabled(False)
-        
-        # 如果不存在，则创建不透明效果
-        if not self.start_processing_button.graphicsEffect():
-            self.opacity_effect = QGraphicsOpacityEffect(self.start_processing_button)
-            self.start_processing_button.setGraphicsEffect(self.opacity_effect)
-        else:
-            self.opacity_effect = self.start_processing_button.graphicsEffect()
+        chapters = self._get_chapters_from_table()
+        if chapters is None:
+            return
 
-        # 停止任何先前的动画
-        if self.processing_animation and self.processing_animation.state() == QPropertyAnimation.Running:
-            self.processing_animation.stop()
+        self._begin_processing(self.full_process_button)
 
-        # 创建并配置动画
-        self.processing_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.processing_animation.setDuration(800)  # 800毫秒
-        self.processing_animation.setStartValue(1.0)
-        self.processing_animation.setEndValue(0.3)
-        self.processing_animation.setEasingCurve(QEasingCurve.InOutQuad)
-        self.processing_animation.setLoopCount(-1)  # 无限循环
-        self.processing_animation.start()
-
-        # 获取章节信息
-        chapters = []
-        for i in range(self.chapter_table.rowCount()):
-            try:
-                title = self.chapter_table.item(i, 0).text()
-                start_page = int(self.chapter_table.item(i, 1).text())
-                end_page = int(self.chapter_table.item(i, 2).text())
-                chapters.append({"title": title, "start_page": start_page, "end_page": end_page})
-            except (ValueError, AttributeError):
-                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的页码或标题无效，请检查。")
-                self.start_processing_button.setEnabled(True)
-                self.start_processing_button.setText("开始处理")
-                return
-
-        # 创建并启动工作线程
         self.full_process_worker = FullProcessWorker(self.current_book_path, chapters)
         self.full_process_worker.log_message.connect(self.log_message)
         self.full_process_worker.progress_update.connect(self.update_progress)
         self.full_process_worker.finished.connect(self.on_full_process_finished)
         self.full_process_worker.start()
 
-        # 启用终止按钮
-        self.terminate_button.setEnabled(True)
-
     def update_progress(self, step_name, percentage):
         """更新处理进度"""
-        self.start_processing_button.setText(f"{step_name} ({percentage}%)")
+        if self._active_processing_button:
+            self._active_processing_button.setText(f"{step_name} ({percentage}%)")
         self.log_message(f"进度: {step_name} ({percentage}%)")
 
     def on_full_process_finished(self, success, message):
         """完整处理流程完成的回调"""
-        # 停止动画
-        if self.processing_animation:
-            self.processing_animation.stop()
-            if self.start_processing_button.graphicsEffect():
-                self.start_processing_button.graphicsEffect().setOpacity(1.0)
-            self.processing_animation = None
-
-        self.start_processing_button.setEnabled(True)
-        self.start_processing_button.setText("开始处理")
-        self.terminate_button.setEnabled(False) # 禁用终止按钮
-        
         path_to_reselect = self.current_book_path
+        self._end_processing()
 
-        # 检查是否是用户手动终止的
         if self.full_process_worker and self.full_process_worker.isInterruptionRequested():
             self.log_message("处理流程已被用户终止。")
             QMessageBox.warning(self, "操作取消", "处理流程已被用户终止。")
         elif success:
-            # 更新元数据状态为“处理完成”
             if self.current_book_path:
                 metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
                 metadata["status"] = "处理完成"
@@ -485,8 +566,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "成功", message)
         else:
             QMessageBox.critical(self, "处理失败", message)
-        
-        # 刷新状态并重新选中书籍
+
         self.load_books()
         if path_to_reselect:
             for i in range(self.book_table_widget.rowCount()):
@@ -494,23 +574,23 @@ class MainWindow(QMainWindow):
                 if item and item.data(Qt.UserRole) == path_to_reselect:
                     self.book_table_widget.selectRow(i)
                     break
-        
-        self.update_button_states()
 
-        # 清理工作线程
         if self.full_process_worker:
             self.full_process_worker.deleteLater()
             self.full_process_worker = None
 
     def terminate_process(self):
-        """暴力终止当前正在运行的处理流程，通过重启应用实现"""
-        if self.full_process_worker and self.full_process_worker.isRunning():
-            reply = QMessageBox.question(self, "确认重启", 
-                                       "确定要终止当前的处理流程并重启应用吗？\n未保存的进度将会丢失。",
-                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        """终止当前正在运行的处理流程，通过重启应用实现"""
+        running = [
+            w for w in (self.full_process_worker, self.pdf_parse_worker, self.llm_report_worker)
+            if w and w.isRunning()
+        ]
+        if running:
+            reply = QMessageBox.question(self, "确认重启",
+                                         "确定要终止当前的处理流程并重启应用吗？\n未保存的进度将会丢失。",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.log_message("用户请求重启应用...")
-                # 强制重启应用
                 QApplication.quit()
                 os.execl(sys.executable, sys.executable, *sys.argv)
 
@@ -756,6 +836,11 @@ class MainWindow(QMainWindow):
             QLineEdit:focus, QTextEdit:focus, QAbstractSpinBox:focus {
                 border-color: #667eea;
                 color: #1a202c;
+            }
+            QTableWidget QLineEdit {
+                padding: 2px 6px;
+                border-radius: 4px;
+                min-height: 0px;
             }
 
             QTabWidget::pane {
@@ -1259,27 +1344,200 @@ class MainWindow(QMainWindow):
     def update_button_states(self):
         """更新按钮的启用状态"""
         if not self.current_book_path:
-            self.start_processing_button.setEnabled(False)
+            self.pdf_parse_button.setEnabled(False)
+            self.llm_analyze_button.setEnabled(False)
+            self.full_process_button.setEnabled(False)
+            selected_group = self.book_group_combo.currentText()
+            self.upload_book_button.setEnabled(bool(selected_group))
+            if selected_group:
+                self.upload_book_button.setText(f"上传到 {selected_group}")
+            else:
+                self.upload_book_button.setText("上传书籍")
             return
 
-        # 检查元数据
         metadata = self.book_manager.get_book_metadata(self.current_book_path)
         status = metadata.get("status") if metadata else None
-        
-        # 允许处理的状态
-        allowed_statuses = ["完成章节编辑", "处理完成"]
-        can_process = status in allowed_statuses
-        
-        # 检查PDF文件是否存在
+
         pdf_exists = os.path.exists(os.path.join(self.current_book_path, "original.pdf"))
 
-        # “开始处理”按钮在特定状态下且PDF存在时可用
-        self.start_processing_button.setEnabled(can_process and pdf_exists)
+        markdown_dir = os.path.join(self.current_book_path, "chapters_markdown")
+        has_markdown = (os.path.isdir(markdown_dir) and
+                        any(f.endswith(".md") for f in os.listdir(markdown_dir)))
 
-        # 更新上传按钮状态
+        allowed_parse_statuses = ["完成章节编辑", "处理完成", "PDF解析完成"]
+        can_parse = status in allowed_parse_statuses and pdf_exists
+
+        self.pdf_parse_button.setEnabled(can_parse)
+        self.llm_analyze_button.setEnabled(has_markdown)
+        self.full_process_button.setEnabled(can_parse)
+
         selected_group = self.book_group_combo.currentText()
         self.upload_book_button.setEnabled(bool(selected_group))
         if selected_group:
             self.upload_book_button.setText(f"上传到 {selected_group}")
         else:
             self.upload_book_button.setText("上传书籍")
+
+    def _get_chapters_from_table(self):
+        """从章节表格读取章节数据，出错返回 None。"""
+        chapters = []
+        for i in range(self.chapter_table.rowCount()):
+            try:
+                title = self.chapter_table.item(i, 0).text()
+                start_page = int(self.chapter_table.item(i, 1).text())
+                end_page = int(self.chapter_table.item(i, 2).text())
+                chapters.append({"title": title, "start_page": start_page, "end_page": end_page})
+            except (ValueError, AttributeError):
+                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的页码或标题无效，请检查。")
+                return None
+        return chapters
+
+    def _begin_processing(self, button):
+        """禁用所有处理按钮，对活动按钮启动呼吸动画，启用终止按钮。"""
+        self._active_processing_button = button
+        self._active_processing_button_original_text = button.text()
+
+        for btn in (self.pdf_parse_button, self.llm_analyze_button, self.full_process_button):
+            btn.setEnabled(False)
+
+        if not button.graphicsEffect():
+            self.opacity_effect = QGraphicsOpacityEffect(button)
+            button.setGraphicsEffect(self.opacity_effect)
+        else:
+            self.opacity_effect = button.graphicsEffect()
+
+        if self.processing_animation and self.processing_animation.state() == QPropertyAnimation.Running:
+            self.processing_animation.stop()
+
+        self.processing_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.processing_animation.setDuration(800)
+        self.processing_animation.setStartValue(1.0)
+        self.processing_animation.setEndValue(0.3)
+        self.processing_animation.setEasingCurve(QEasingCurve.InOutQuad)
+        self.processing_animation.setLoopCount(-1)
+        self.processing_animation.start()
+
+        self.terminate_button.setEnabled(True)
+
+    def _end_processing(self):
+        """停止动画，恢复按钮文字，重新计算按钮状态。"""
+        if self.processing_animation:
+            self.processing_animation.stop()
+            btn = self._active_processing_button
+            if btn and btn.graphicsEffect():
+                btn.graphicsEffect().setOpacity(1.0)
+            self.processing_animation = None
+
+        if self._active_processing_button and self._active_processing_button_original_text:
+            self._active_processing_button.setText(self._active_processing_button_original_text)
+
+        self._active_processing_button = None
+        self._active_processing_button_original_text = None
+        self.terminate_button.setEnabled(False)
+        self.update_button_states()
+
+    def start_pdf_parse(self):
+        """开始PDF解析流程（章节切分 + MinerU解析 + JSON转Markdown）"""
+        if not self.current_book_path:
+            QMessageBox.warning(self, "错误", "请先选择一本书")
+            return
+
+        reply = QMessageBox.question(self, "确认处理",
+                                     "确定要开始PDF解析吗？\n依次执行：\n1. 章节切分\n2. MinerU解析\n3. JSON转Markdown\n\n此过程可能需要较长时间。",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        chapters = self._get_chapters_from_table()
+        if chapters is None:
+            return
+
+        self._begin_processing(self.pdf_parse_button)
+
+        self.pdf_parse_worker = PDFParseWorker(self.current_book_path, chapters)
+        self.pdf_parse_worker.log_message.connect(self.log_message)
+        self.pdf_parse_worker.progress_update.connect(self.update_progress)
+        self.pdf_parse_worker.finished.connect(self.on_pdf_parse_finished)
+        self.pdf_parse_worker.start()
+
+    def on_pdf_parse_finished(self, success, message):
+        """PDF解析完成回调"""
+        path_to_reselect = self.current_book_path
+        self._end_processing()
+
+        if self.pdf_parse_worker and self.pdf_parse_worker.isInterruptionRequested():
+            self.log_message("PDF解析已被用户终止。")
+            QMessageBox.warning(self, "操作取消", "PDF解析已被用户终止。")
+        elif success:
+            if self.current_book_path:
+                metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
+                metadata["status"] = "PDF解析完成"
+                self.book_manager.save_book_metadata(self.current_book_path, metadata)
+            QMessageBox.information(self, "成功", message)
+        else:
+            QMessageBox.critical(self, "解析失败", message)
+
+        self.load_books()
+        if path_to_reselect:
+            for i in range(self.book_table_widget.rowCount()):
+                item = self.book_table_widget.item(i, 1)
+                if item and item.data(Qt.UserRole) == path_to_reselect:
+                    self.book_table_widget.selectRow(i)
+                    break
+
+        if self.pdf_parse_worker:
+            self.pdf_parse_worker.deleteLater()
+            self.pdf_parse_worker = None
+
+    def start_llm_analyze(self):
+        """开始LLM分析流程（LLM分析 + 生成Word报告）"""
+        if not self.current_book_path:
+            QMessageBox.warning(self, "错误", "请先选择一本书")
+            return
+
+        reply = QMessageBox.question(self, "确认处理",
+                                     "确定要开始LLM分析吗？\n依次执行：\n1. LLM分析\n2. 生成Word报告\n\n此过程可能需要较长时间。",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        chapters = self._get_chapters_from_table()
+        if chapters is None:
+            return
+
+        self._begin_processing(self.llm_analyze_button)
+
+        self.llm_report_worker = LLMWithReportWorker(self.current_book_path, chapters)
+        self.llm_report_worker.log_message.connect(self.log_message)
+        self.llm_report_worker.progress_update.connect(self.update_progress)
+        self.llm_report_worker.finished.connect(self.on_llm_analyze_finished)
+        self.llm_report_worker.start()
+
+    def on_llm_analyze_finished(self, success, message):
+        """LLM分析完成回调"""
+        path_to_reselect = self.current_book_path
+        self._end_processing()
+
+        if self.llm_report_worker and self.llm_report_worker.isInterruptionRequested():
+            self.log_message("LLM分析已被用户终止。")
+            QMessageBox.warning(self, "操作取消", "LLM分析已被用户终止。")
+        elif success:
+            if self.current_book_path:
+                metadata = self.book_manager.get_book_metadata(self.current_book_path) or {}
+                metadata["status"] = "处理完成"
+                self.book_manager.save_book_metadata(self.current_book_path, metadata)
+            QMessageBox.information(self, "成功", message)
+        else:
+            QMessageBox.critical(self, "分析失败", message)
+
+        self.load_books()
+        if path_to_reselect:
+            for i in range(self.book_table_widget.rowCount()):
+                item = self.book_table_widget.item(i, 1)
+                if item and item.data(Qt.UserRole) == path_to_reselect:
+                    self.book_table_widget.selectRow(i)
+                    break
+
+        if self.llm_report_worker:
+            self.llm_report_worker.deleteLater()
+            self.llm_report_worker = None

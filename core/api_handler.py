@@ -176,8 +176,8 @@ class LLMAPI:
         Returns:
             API响应字典，包含分析结果
         """
-        max_retries = 3
-        base_backoff = 1  # seconds
+        max_retries = 10
+        base_backoff = 2  # seconds
 
         for attempt in range(max_retries):
             try:
@@ -190,18 +190,20 @@ class LLMAPI:
                 else:
                     raise NotImplementedError(f"不支持的LLM提供商: {self.provider}")
             except requests.exceptions.RequestException as e:
-                # 只对特定的服务器错误 (5xx) 进行重试
-                if e.response is not None and 500 <= e.response.status_code < 600:
+                status_code = e.response.status_code if e.response is not None else None
+                # 对 429 (限流) 和 5xx (服务器错误) 进行重试
+                if status_code is not None and (status_code == 429 or 500 <= status_code < 600):
                     if attempt < max_retries - 1:
-                        wait_time = base_backoff * (2 ** attempt) + (os.urandom(1)[0] / 255.0) # 添加抖动
-                        print(f"API调用失败 (尝试 {attempt + 1}/{max_retries})，状态码: {e.response.status_code}。将在 {wait_time:.2f} 秒后重试...")
+                        # 429 使用更长的退避时间，避免继续触发限流
+                        wait_time = base_backoff * (1.5 ** attempt) + (os.urandom(1)[0] / 255.0)
+                        print(f"API调用失败 (尝试 {attempt + 1}/{max_retries})，状态码: {status_code}。将在 {wait_time:.2f} 秒后重试...")
                         time.sleep(wait_time)
                     else:
-                        raise Exception(f"{self.provider} API请求在 {max_retries} 次尝试后仍然失败: {e}")
+                        raise Exception(f"{self.provider} API请求在 {max_retries} 次尝试后仍然失败: {self._format_request_exception(e)}")
                 else:
-                    # 对于客户端错误，尽量附带响应体，便于定位模型权限或鉴权问题
+                    # 其他客户端错误 (4xx) 不重试，直接抛出
                     raise Exception(self._format_request_exception(e))
-        return None # 如果循环结束仍未成功，理论上不会执行到这里
+        return None  # 理论上不会执行到这里
 
     def _format_request_exception(self, error: requests.exceptions.RequestException) -> str:
         """为HTTP异常补充状态码和响应体摘要，便于排查供应商错误。"""
@@ -234,7 +236,7 @@ class LLMAPI:
             "max_tokens": self.llm_config['max_tokens']
         }
         
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response = requests.post(url, headers=headers, json=payload, timeout=600)
         response.raise_for_status()
         # 统一返回格式
         result = response.json()
@@ -252,7 +254,7 @@ class LLMAPI:
             }
         }
         
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response = requests.post(url, headers=headers, json=payload, timeout=600)
         response.raise_for_status()
         # 统一返回格式
         result = response.json()
@@ -275,7 +277,7 @@ class LLMAPI:
             "max_completion_tokens": self.llm_config['max_tokens']
         }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response = requests.post(url, headers=headers, json=payload, timeout=600)
         response.raise_for_status()
         result = response.json()
         return {'content': result['choices'][0]['message']['content']}

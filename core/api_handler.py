@@ -2,6 +2,7 @@ import requests
 import time
 import os
 import json
+import hashlib
 import configparser
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,8 +14,8 @@ DEFAULT_MINERU_LANGUAGE = "ch"
 MINERU_LANGUAGE_OPTIONS = {"ch", "en", "auto"}
 DEFAULT_MINERU_MODEL_VERSION = "pipeline"
 MINERU_MODEL_VERSION_OPTIONS = {"pipeline", "vlm", "MinerU-HTML"}
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 DEFAULT_ZENMUX_BASE_URL = "https://zenmux.ai/api/v1"
 DEFAULT_ZENMUX_MODEL_NAME = "google/gemini-3.1-pro-preview"
 
@@ -46,10 +47,9 @@ class ConfigManager:
         self.load_config()
     
     def load_config(self):
-        """加载配置文件"""
+        """加载配置文件，keys.ini 中的 api_key 优先级高于 config.ini。"""
         self.config.clear()
-        if os.path.exists(self.config_file):
-            self.config.read(self.config_file, encoding='utf-8')
+        self.config.read([self.config_file, 'keys.ini'], encoding='utf-8')
     
     def get_mineru_config(self) -> Dict:
         """获取MinerU配置"""
@@ -101,7 +101,7 @@ class ConfigManager:
                 return self._get_default_deepseek_config()
             elif provider == "Gemini":
                 return self._get_default_gemini_config()
-            elif provider == "Zenmux":
+            elif provider == "中转站":
                 return self._get_default_zenmux_config()
             return {}
             
@@ -181,14 +181,7 @@ class LLMAPI:
 
         for attempt in range(max_retries):
             try:
-                if self.provider == "DeepSeek":
-                    return self._analyze_with_deepseek(text)
-                elif self.provider == "Gemini":
-                    return self._analyze_with_gemini(text)
-                elif self.provider == "Zenmux":
-                    return self._analyze_with_zenmux(text)
-                else:
-                    raise NotImplementedError(f"不支持的LLM提供商: {self.provider}")
+                return self._call_openai_compat(text)
             except requests.exceptions.RequestException as e:
                 status_code = e.response.status_code if e.response is not None else None
                 # 对 429 (限流) 和 5xx (服务器错误) 进行重试
@@ -219,9 +212,9 @@ class LLMAPI:
             return f"{response.status_code} {response.reason}: {response_preview}"
         return f"{response.status_code} {response.reason}: {error}"
 
-    def _analyze_with_deepseek(self, text: str) -> Optional[Dict]:
-        """使用DeepSeek API分析"""
-        url = f"{self.provider_config['base_url']}/v1/chat/completions"
+    def _call_openai_compat(self, text: str) -> Optional[Dict]:
+        """统一的 OpenAI 兼容接口调用（DeepSeek / Gemini / 中转站 均适用）。"""
+        url = f"{self.provider_config['base_url']}/chat/completions"
         headers = {
             'Content-Type': 'application/json',
             'Authorization': f"Bearer {self.provider_config['api_key']}"
@@ -235,48 +228,6 @@ class LLMAPI:
             "temperature": self.llm_config['temperature'],
             "max_tokens": self.llm_config['max_tokens']
         }
-        
-        response = requests.post(url, headers=headers, json=payload, timeout=600)
-        response.raise_for_status()
-        # 统一返回格式
-        result = response.json()
-        return {'content': result['choices'][0]['message']['content']}
-
-    def _analyze_with_gemini(self, text: str) -> Optional[Dict]:
-        """使用Gemini API分析"""
-        url = f"{self.provider_config['base_url']}/v1beta/models/{self.llm_config['model_name']}:generateContent?key={self.provider_config['api_key']}"
-        headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": [{"parts": [{"text": f"{self.llm_config['prompt']}\n\n{text}"}]}],
-            "generationConfig": {
-                "temperature": self.llm_config['temperature'],
-                "maxOutputTokens": self.llm_config['max_tokens']
-            }
-        }
-        
-        response = requests.post(url, headers=headers, json=payload, timeout=600)
-        response.raise_for_status()
-        # 统一返回格式
-        result = response.json()
-        return {'content': result['candidates'][0]['content']['parts'][0]['text']}
-
-    def _analyze_with_zenmux(self, text: str) -> Optional[Dict]:
-        """使用Zenmux OpenAI兼容接口分析。"""
-        url = f"{self.provider_config['base_url']}/chat/completions"
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f"Bearer {self.provider_config['api_key']}"
-        }
-        payload = {
-            "model": self.llm_config['model_name'] or DEFAULT_ZENMUX_MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": self.llm_config['prompt']},
-                {"role": "user", "content": text}
-            ],
-            "temperature": self.llm_config['temperature'],
-            "max_completion_tokens": self.llm_config['max_tokens']
-        }
-
         response = requests.post(url, headers=headers, json=payload, timeout=600)
         response.raise_for_status()
         result = response.json()
@@ -632,6 +583,33 @@ class APIHandler:
         self.content_extractor = ContentExtractor()
         self.json_to_markdown = JSONToMarkdownConverter()
 
+    @staticmethod
+    def _compute_file_hash(file_path: str) -> str:
+        h = hashlib.md5()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _is_chapter_cached(self, chapter_path: str, mineru_json_dir: str) -> bool:
+        chapter_name = os.path.splitext(os.path.basename(chapter_path))[0]
+        chapter_output_dir = os.path.join(mineru_json_dir, chapter_name)
+        hash_file = os.path.join(chapter_output_dir, '.source_hash')
+
+        if not os.path.exists(hash_file):
+            return False
+        if not any(f.endswith('.json') for f in os.listdir(chapter_output_dir)):
+            return False
+
+        stored_hash = open(hash_file, 'r').read().strip()
+        return self._compute_file_hash(chapter_path) == stored_hash
+
+    def _save_chapter_hash(self, chapter_path: str, mineru_json_dir: str):
+        chapter_name = os.path.splitext(os.path.basename(chapter_path))[0]
+        hash_file = os.path.join(mineru_json_dir, chapter_name, '.source_hash')
+        with open(hash_file, 'w') as f:
+            f.write(self._compute_file_hash(chapter_path))
+
     def refresh_clients(self):
         """在每次处理前重新加载配置，避免要求重启应用。"""
         self.config_manager.load_config()
@@ -689,43 +667,56 @@ class APIHandler:
             
             if log_callback:
                 log_callback(f"找到 {len(chapter_files)} 个章节文件，开始MinerU解析...")
-            
-            # 调用MinerU API
-            results = self.mineru_api.process_chapters(
-                chapter_files, status_callback, log_callback
-            )
-            
-            if not results:
-                if log_callback:
-                    log_callback("MinerU解析失败")
-                return False
-            
+
             # 下载和解压结果
             mineru_json_dir = os.path.join(book_path, "MinerU_json")
             os.makedirs(mineru_json_dir, exist_ok=True)
-            
-            success_count = 0
-            for filename, result_data in results.items():
-                zip_url = result_data.get('full_zip_url')
-                if not zip_url:
+
+            # 缓存过滤：命中缓存的章节直接跳过
+            cached_files = [p for p in chapter_files if self._is_chapter_cached(p, mineru_json_dir)]
+            uncached_files = [p for p in chapter_files if p not in cached_files]
+
+            if cached_files and log_callback:
+                names = ', '.join(os.path.basename(p) for p in cached_files)
+                log_callback(f"命中缓存，跳过MinerU解析: {names}")
+
+            success_count = len(cached_files)
+
+            if uncached_files:
+                # 仅对未缓存章节调用MinerU API
+                results = self.mineru_api.process_chapters(
+                    uncached_files, status_callback, log_callback
+                )
+
+                if not results:
                     if log_callback:
-                        log_callback(f"警告: {filename} 没有找到下载链接")
-                    continue
-                
-                # 为每个章节创建单独目录
-                chapter_name = os.path.splitext(filename)[0]
-                chapter_output_dir = os.path.join(mineru_json_dir, chapter_name)
-                
-                if self.content_extractor.download_and_extract(
-                    zip_url, chapter_output_dir, log_callback
-                ):
-                    success_count += 1
+                        log_callback("MinerU解析失败")
+                    if success_count == 0:
+                        return False
                 else:
-                    if log_callback:
-                        log_callback(f"下载解压失败: {filename}")
+                    for filename, result_data in results.items():
+                        zip_url = result_data.get('full_zip_url')
+                        if not zip_url:
+                            if log_callback:
+                                log_callback(f"警告: {filename} 没有找到下载链接")
+                            continue
+
+                        chapter_name = os.path.splitext(filename)[0]
+                        chapter_output_dir = os.path.join(mineru_json_dir, chapter_name)
+
+                        if self.content_extractor.download_and_extract(
+                            zip_url, chapter_output_dir, log_callback
+                        ):
+                            # 下载成功后保存哈希，供下次缓存命中
+                            chapter_path = os.path.join(chapters_pdf_dir, filename)
+                            self._save_chapter_hash(chapter_path, mineru_json_dir)
+                            success_count += 1
+                        else:
+                            if log_callback:
+                                log_callback(f"下载解压失败: {filename}")
             
             if log_callback:
-                log_callback(f"MinerU处理完成: {success_count}/{len(results)} 个文件成功")
+                log_callback(f"MinerU处理完成: {success_count}/{len(chapter_files)} 个文件成功")
             
             # 如果MinerU处理成功，继续转换JSON为Markdown
             if success_count > 0:

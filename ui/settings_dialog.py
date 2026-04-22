@@ -27,15 +27,12 @@ DEFAULT_MINERU_LANGUAGE = "ch"
 MINERU_LANGUAGE_OPTIONS = ["ch", "en", "auto"]
 DEFAULT_MINERU_MODEL_VERSION = "pipeline"
 MINERU_MODEL_VERSION_OPTIONS = ["pipeline", "vlm", "MinerU-HTML"]
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 DEFAULT_ZENMUX_BASE_URL = "https://zenmux.ai/api/v1"
 DEFAULT_ZENMUX_MODEL_NAME = "google/gemini-3.1-pro-preview"
 ZENMUX_MODEL_OPTIONS = [
-    "google/gemini-3.1-pro-preview",
-    "google/gemini-2.5-pro",
-    "google/gemini-2.5-flash",
-    "openai/gpt-5.2",
+    "gemini-3.1-pro-preview",
 ]
 
 
@@ -65,8 +62,10 @@ class SettingsDialog(QDialog):
         self.resize(600, 500)
         
         self.config_file = "config.ini"
+        self.keys_file = "keys.ini"
         self.config = configparser.ConfigParser()
-        
+        self.keys_config = configparser.ConfigParser()
+
         self.init_ui()
         self.setup_styles()
         self.load_settings()
@@ -356,7 +355,7 @@ class SettingsDialog(QDialog):
         provider_layout = QFormLayout(provider_group)
 
         self.llm_provider_combo = QComboBox()
-        self.llm_provider_combo.addItems(["DeepSeek", "Gemini", "Zenmux"])
+        self.llm_provider_combo.addItems(["DeepSeek", "Gemini", "中转站"])
         self.llm_provider_combo.currentTextChanged.connect(self._on_llm_provider_changed)
         provider_layout.addRow("选择模型提供商:", self.llm_provider_combo)
 
@@ -375,10 +374,10 @@ class SettingsDialog(QDialog):
         provider_layout.addRow(self.gemini_api_key_label, self.gemini_api_key)
 
         # Zenmux API Key (initially hidden)
-        self.zenmux_api_key_label = QLabel("Zenmux API Key:")
+        self.zenmux_api_key_label = QLabel("中转站 API Key:")
         self.zenmux_api_key = QLineEdit()
         self.zenmux_api_key.setEchoMode(QLineEdit.Password)
-        self.zenmux_api_key.setPlaceholderText("请输入Zenmux API Key")
+        self.zenmux_api_key.setPlaceholderText("请输入中转站 API Key")
         provider_layout.addRow(self.zenmux_api_key_label, self.zenmux_api_key)
 
         self.llm_base_url = QLineEdit()
@@ -481,7 +480,7 @@ class SettingsDialog(QDialog):
         """当LLM提供商变化时更新UI"""
         is_deepseek = provider == "DeepSeek"
         is_gemini = provider == "Gemini"
-        is_zenmux = provider == "Zenmux"
+        is_zenmux = provider == "中转站"
 
         # 控制API Key输入框的可见性
         self.deepseek_api_key_label.setVisible(is_deepseek)
@@ -502,19 +501,27 @@ class SettingsDialog(QDialog):
             self.llm_model_name.addItems(["gemini-2.5-pro","gemini-2.5-flash"])
             self.llm_model_name.setCurrentText(self.config.get('LLM', 'model_name', fallback='gemini-2.5-flash'))
         elif is_zenmux:
-            self.llm_base_url.setText(self.config.get('Zenmux', 'base_url', fallback=DEFAULT_ZENMUX_BASE_URL))
+            self.llm_base_url.setText(self.config.get('中转站', 'base_url', fallback=DEFAULT_ZENMUX_BASE_URL))
             self.llm_model_name.addItems(ZENMUX_MODEL_OPTIONS)
             self.llm_model_name.setCurrentText(
                 self.config.get('LLM', 'model_name', fallback=DEFAULT_ZENMUX_MODEL_NAME)
             )
     
+    def _get_api_key(self, section: str) -> str:
+        """从 keys.ini 读取 API Key，若不存在则回退到 config.ini（兼容旧配置）。"""
+        key = self.keys_config.get(section, 'api_key', fallback='')
+        if not key:
+            key = self.config.get(section, 'api_key', fallback='')
+        return key
+
     def load_settings(self):
         """从配置文件加载设置"""
         if not os.path.exists(self.config_file):
             self._on_llm_provider_changed(self.llm_provider_combo.currentText())
             return
-            
+
         self.config.read(self.config_file, encoding='utf-8')
+        self.keys_config.read(self.keys_file, encoding='utf-8')
 
         # 加载通用设置
         if self.config.has_section('General'):
@@ -524,7 +531,7 @@ class SettingsDialog(QDialog):
         # 加载MinerU设置
         if self.config.has_section('MinerU'):
             mineru_section = self.config['MinerU']
-            self.mineru_api_key.setText(mineru_section.get('api_key', ''))
+            self.mineru_api_key.setText(self._get_api_key('MinerU'))
             self.mineru_base_url.setText(mineru_section.get('base_url', DEFAULT_MINERU_BASE_URL))
             self.enable_ocr.setChecked(mineru_section.getboolean('enable_ocr', True))
             self.enable_formula.setChecked(mineru_section.getboolean('enable_formula', True))
@@ -541,9 +548,9 @@ class SettingsDialog(QDialog):
             self.max_attempts.setValue(mineru_section.getint('max_attempts', 60))
         
         # 加载LLM提供商的独立设置
-        self.deepseek_api_key.setText(self.config.get('DeepSeek', 'api_key', fallback=''))
-        self.gemini_api_key.setText(self.config.get('Gemini', 'api_key', fallback=''))
-        self.zenmux_api_key.setText(self.config.get('Zenmux', 'api_key', fallback=''))
+        self.deepseek_api_key.setText(self._get_api_key('DeepSeek'))
+        self.gemini_api_key.setText(self._get_api_key('Gemini'))
+        self.zenmux_api_key.setText(self._get_api_key('中转站'))
 
         # 加载LLM通用设置
         if self.config.has_section('LLM'):
@@ -568,7 +575,7 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         """保存设置到配置文件"""
         # 确保配置文件有必要的节
-        for section in ['General', 'MinerU', 'DeepSeek', 'Gemini', 'Zenmux', 'LLM']:
+        for section in ['General', 'MinerU', 'DeepSeek', 'Gemini', '中转站', 'LLM']:
             if not self.config.has_section(section):
                 self.config.add_section(section)
 
@@ -577,7 +584,6 @@ class SettingsDialog(QDialog):
         
         # 保存MinerU设置
         mineru_section = self.config['MinerU']
-        mineru_section['api_key'] = self.mineru_api_key.text().strip()
         mineru_section['base_url'] = self.mineru_base_url.text().strip() or DEFAULT_MINERU_BASE_URL
         mineru_section['enable_ocr'] = str(self.enable_ocr.isChecked())
         mineru_section['enable_formula'] = str(self.enable_formula.isChecked())
@@ -587,10 +593,14 @@ class SettingsDialog(QDialog):
         mineru_section['poll_interval'] = str(self.poll_interval.value())
         mineru_section['max_attempts'] = str(self.max_attempts.value())
         
-        # 保存各个LLM提供商的设置
-        self.config['DeepSeek']['api_key'] = self.deepseek_api_key.text().strip()
-        self.config['Gemini']['api_key'] = self.gemini_api_key.text().strip()
-        self.config['Zenmux']['api_key'] = self.zenmux_api_key.text().strip()
+        # API Key 单独保存到 keys.ini（不写入 config.ini）
+        for section in ['MinerU', 'DeepSeek', 'Gemini', '中转站']:
+            if not self.keys_config.has_section(section):
+                self.keys_config.add_section(section)
+        self.keys_config['MinerU']['api_key'] = self.mineru_api_key.text().strip()
+        self.keys_config['DeepSeek']['api_key'] = self.deepseek_api_key.text().strip()
+        self.keys_config['Gemini']['api_key'] = self.gemini_api_key.text().strip()
+        self.keys_config['中转站']['api_key'] = self.zenmux_api_key.text().strip()
         
         # 根据当前选择保存URL
         provider = self.llm_provider_combo.currentText()
@@ -598,8 +608,8 @@ class SettingsDialog(QDialog):
             self.config['DeepSeek']['base_url'] = self.llm_base_url.text().strip() or DEFAULT_DEEPSEEK_BASE_URL
         elif provider == "Gemini":
             self.config['Gemini']['base_url'] = self.llm_base_url.text().strip() or DEFAULT_GEMINI_BASE_URL
-        elif provider == "Zenmux":
-            self.config['Zenmux']['base_url'] = self.llm_base_url.text().strip() or DEFAULT_ZENMUX_BASE_URL
+        elif provider == "中转站":
+            self.config['中转站']['base_url'] = self.llm_base_url.text().strip() or DEFAULT_ZENMUX_BASE_URL
 
         # 保存LLM通用设置
         llm_section = self.config['LLM']
@@ -614,6 +624,8 @@ class SettingsDialog(QDialog):
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 self.config.write(f)
+            with open(self.keys_file, 'w', encoding='utf-8') as f:
+                self.keys_config.write(f)
             QMessageBox.information(self, "成功", "设置已保存")
             self.accept()
         except Exception as e:

@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(uv run *)",
+      "Bash(kill %1)",
+      "Bash(sudo apt-get *)",
+      "Bash(ldconfig -p)",
+      "Bash(dpkg -l libxcb-cursor0)",
+      "Bash(ldd /home/terrariver/projects/Academic_Book_Analyze_Tool/.venv/lib/python3.12/site-packages/PySide6/Qt/plugins/platforms/libqxcb.so)",
+      "WebFetch(domain:mineru.net)",
+      "Bash(curl -s https://mineru.net/apiManage/docs)",
+      "Bash(git check-ignore *)"
     ]
   }
 }

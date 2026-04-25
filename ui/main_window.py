@@ -21,16 +21,40 @@ from PySide6.QtWidgets import (
     QMenu,
     QDialog,
     QProgressBar,
-    QStackedWidget, # Added for main content area
-    QComboBox, # Added for book group selection
+    QStackedWidget,
+    QComboBox,
     QGraphicsOpacityEffect,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
 )
 from PySide6.QtWidgets import QTextEdit
-from PySide6.QtGui import QIcon, QFont, QTextCursor
+from PySide6.QtGui import QIcon, QFont, QTextCursor, QColor
 from core.book_manager import BookManager
 from core.pdf_processor import get_bookmarks
 from core.api_handler import APIHandler
 from ui.settings_dialog import SettingsDialog
+
+
+class TitleIndentDelegate(QStyledItemDelegate):
+    """
+    章节标题列代理：根据层级（读自同行第 0 列）在绘制时添加视觉缩进，
+    不修改 item 文本，双击编辑时仍显示原始标题。
+    """
+    INDENT_PX = 20  # 每增加一级的缩进像素数
+
+    def paint(self, painter, option, index):
+        level_text = index.sibling(index.row(), 0).data() or 'L1'
+        try:
+            level = int(str(level_text).lstrip('L'))
+        except ValueError:
+            level = 1
+        indent = (level - 1) * self.INDENT_PX
+        if indent > 0:
+            opt = QStyleOptionViewItem(option)
+            opt.rect = option.rect.adjusted(indent, 0, 0, 0)
+            super().paint(painter, opt, index)
+        else:
+            super().paint(painter, option, index)
 
 
 class MinerUWorker(QThread):
@@ -328,6 +352,7 @@ class MainWindow(QMainWindow):
         self.llm_report_worker = None
         self._active_processing_button = None
         self._active_processing_button_original_text = None
+        self._total_pdf_pages = 0  # 当前书籍的 PDF 总页数
 
         # 创建菜单栏
         self.create_menu_bar()
@@ -432,30 +457,52 @@ class MainWindow(QMainWindow):
         right_toolbar_layout.addStretch()
         book_detail_layout.addLayout(right_toolbar_layout)
 
-        book_detail_layout.addWidget(QLabel("章节管理"))
+        # 章节管理标题行（右侧显示文档总页数）
+        chapter_header_layout = QHBoxLayout()
+        chapter_header_layout.addWidget(QLabel("章节管理"))
+        chapter_header_layout.addStretch()
+        self.total_pages_label = QLabel("共 — 页")
+        self.total_pages_label.setObjectName("total_pages_hint")
+        chapter_header_layout.addWidget(self.total_pages_label)
+        book_detail_layout.addLayout(chapter_header_layout)
 
         self.chapter_table = QTableWidget()
         self.chapter_table.setObjectName("chapter_table")
-        self.chapter_table.setColumnCount(3)
-        self.chapter_table.setHorizontalHeaderLabels(["章节标题", "起始页", "结束页"])
-        self.chapter_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.chapter_table.setColumnCount(4)
+        self.chapter_table.setHorizontalHeaderLabels(["层级", "章节标题", "起始页", "结束页"])
+        ch_header = self.chapter_table.horizontalHeader()
+        ch_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        self.chapter_table.setColumnWidth(0, 55)
+        ch_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        ch_header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.chapter_table.setColumnWidth(2, 80)
+        ch_header.setSectionResizeMode(3, QHeaderView.Fixed)
+        self.chapter_table.setColumnWidth(3, 80)
         self.chapter_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.chapter_table.customContextMenuRequested.connect(self.show_chapter_context_menu)
-        # 设置表格为可编辑
         self.chapter_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
-        # 设置行高
         self.chapter_table.verticalHeader().setDefaultSectionSize(50)
+        # 标题列缩进代理（优先级 5）
+        self.chapter_table.setItemDelegateForColumn(1, TitleIndentDelegate(self.chapter_table))
+        # 单元格变化联动（优先级 1）+ 层级单击切换（优先级 3）
+        self.chapter_table.cellChanged.connect(self._on_cell_changed)
+        self.chapter_table.cellClicked.connect(self._on_cell_clicked)
         book_detail_layout.addWidget(self.chapter_table)
 
         button_layout = QHBoxLayout()
         self.add_chapter_button = QPushButton("添加章节")
         self.add_chapter_button.setIcon(QIcon("assets/icons/add.png"))
-        self.add_chapter_button.clicked.connect(self.add_chapter)
+        self.add_chapter_button.clicked.connect(lambda: self.add_chapter())
         self.save_chapters_button = QPushButton("保存章节")
         self.save_chapters_button.setIcon(QIcon("assets/icons/save.png"))
         self.save_chapters_button.clicked.connect(self.save_chapters)
+        self.auto_fill_button = QPushButton("一键推算结束页")
+        self.auto_fill_button.setObjectName("secondary")
+        self.auto_fill_button.setToolTip("用下一章起始页−1 自动填充每章结束页，末章填充文档总页数")
+        self.auto_fill_button.clicked.connect(self._auto_fill_end_pages)
         button_layout.addWidget(self.add_chapter_button)
         button_layout.addWidget(self.save_chapters_button)
+        button_layout.addWidget(self.auto_fill_button)
         book_detail_layout.addLayout(button_layout)
 
         # 处理按钮区（三个阶段按钮）
@@ -676,12 +723,34 @@ class MainWindow(QMainWindow):
             }
             
             QPushButton#danger {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #fc8181, stop:1 #e53e3e);
             }
             QPushButton#danger:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #f56565, stop:1 #c53030);
+            }
+
+            QPushButton#secondary {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #edf2f7, stop:1 #e2e8f0);
+                color: #2d3748;
+            }
+            QPushButton#secondary:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #e2e8f0, stop:1 #cbd5e0);
+            }
+            QPushButton#secondary:disabled {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f7fafc, stop:1 #edf2f7);
+                color: #a0aec0;
+            }
+
+            QLabel#total_pages_hint {
+                font-weight: 400;
+                font-size: 12px;
+                color: #718096;
+                margin-bottom: 0px;
             }
             
             QPushButton#success {
@@ -734,7 +803,6 @@ class MainWindow(QMainWindow):
                 border-bottom: 1px solid #f7fafc;
                 min-height: 40px;
                 color: #1a202c;
-                background-color: #ffffff;
             }
             QTreeWidget::item:hover, QTableWidget::item:hover {
                 background-color: #f0fff4;
@@ -974,8 +1042,7 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         """打开设置对话框"""
         dialog = SettingsDialog(self)
-        if dialog.exec() == QDialog.Accepted:
-            self.log_message("设置已更新")
+        dialog.exec()  # 保存操作在对话框内部完成，不依赖 Accepted 信号
 
     def batch_process(self):
         """批量处理功能（待实现）"""
@@ -1197,7 +1264,14 @@ class MainWindow(QMainWindow):
             return
 
         menu = QMenu()
-        
+
+        # 层级设置子菜单
+        level_menu = menu.addMenu("设置层级")
+        set_l1_action = level_menu.addAction("一级 (L1)  — 部 / 篇")
+        set_l2_action = level_menu.addAction("二级 (L2)  — 章")
+        set_l3_action = level_menu.addAction("三级 (L3)  — 节 / 小节")
+        menu.addSeparator()
+
         delete_action = menu.addAction("删除此章节")
         delete_before_action = menu.addAction("删除之前所有章节")
         delete_after_action = menu.addAction("删除之后所有章节")
@@ -1208,10 +1282,16 @@ class MainWindow(QMainWindow):
         save_action = menu.addAction("保存章节")
 
         action = menu.exec(self.chapter_table.mapToGlobal(position))
-        
+
         current_row = item.row()
 
-        if action == delete_action:
+        if action == set_l1_action:
+            self._set_chapter_level(current_row, 1)
+        elif action == set_l2_action:
+            self._set_chapter_level(current_row, 2)
+        elif action == set_l3_action:
+            self._set_chapter_level(current_row, 3)
+        elif action == delete_action:
             self.delete_selected_chapter()
         elif action == delete_before_action:
             self.delete_before_chapters()
@@ -1224,11 +1304,180 @@ class MainWindow(QMainWindow):
         elif action == save_action:
             self.save_chapters()
 
+    def _set_chapter_level(self, row: int, level: int):
+        """通过右键菜单更新指定行的层级并刷新颜色"""
+        level_item = self.chapter_table.item(row, 0)
+        if level_item:
+            self.chapter_table.blockSignals(True)
+            level_item.setText(f"L{level}")
+            self.chapter_table.blockSignals(False)
+        self._validate_all_rows()
+
+    def _update_row_color(self, row: int, level: int):
+        """按层级设置行背景色（单行快速更新，不做验证）"""
+        color = QColor(self._LEVEL_COLORS.get(level, "#FFFFFF"))
+        for col in range(self.chapter_table.columnCount()):
+            it = self.chapter_table.item(row, col)
+            if it:
+                it.setBackground(color)
+
+    # ------------------------------------------------------------------ #
+    #  优先级 1 — 起始页联动                                               #
+    # ------------------------------------------------------------------ #
+
+    def _on_cell_changed(self, row: int, col: int):
+        """起始页变化时自动更新上一章结束页，并实时重新验证。"""
+        self.chapter_table.blockSignals(True)
+        try:
+            if col == 2:  # 起始页列
+                self._sync_previous_end_page(row)
+        finally:
+            self.chapter_table.blockSignals(False)
+        self._validate_all_rows()
+
+    def _sync_previous_end_page(self, row: int):
+        """将第 row 章的起始页 − 1 赋给第 row−1 章的结束页。"""
+        if row == 0:
+            return
+        try:
+            new_start = int(self.chapter_table.item(row, 2).text())
+            prev_end_item = self.chapter_table.item(row - 1, 3)
+            if prev_end_item:
+                prev_end_item.setText(str(new_start - 1))
+        except (ValueError, AttributeError):
+            pass
+
+    # ------------------------------------------------------------------ #
+    #  优先级 2 — 总页数 + 一键推算结束页                                  #
+    # ------------------------------------------------------------------ #
+
+    def _load_total_pages(self):
+        """读取当前书籍的 PDF 总页数并更新标签。"""
+        self._total_pdf_pages = 0
+        if not self.current_book_path:
+            self.total_pages_label.setText("共 — 页")
+            return
+        pdf_path = os.path.join(self.current_book_path, "original.pdf")
+        if not os.path.exists(pdf_path):
+            self.total_pages_label.setText("共 — 页")
+            return
+        try:
+            from pypdf import PdfReader
+            self._total_pdf_pages = len(PdfReader(pdf_path).pages)
+            self.total_pages_label.setText(f"共 {self._total_pdf_pages} 页")
+        except Exception:
+            self.total_pages_label.setText("总页数读取失败")
+
+    def _auto_fill_end_pages(self):
+        """一键推算：用下一章起始页−1 填充结束页；末章填充文档总页数。"""
+        rows = self.chapter_table.rowCount()
+        if rows == 0:
+            return
+        self.chapter_table.blockSignals(True)
+        try:
+            for i in range(rows - 1):
+                try:
+                    next_start = int(self.chapter_table.item(i + 1, 2).text())
+                    end_item = self.chapter_table.item(i, 3)
+                    if end_item:
+                        end_item.setText(str(next_start - 1))
+                except (ValueError, AttributeError):
+                    pass
+            # 末章
+            if self._total_pdf_pages > 0:
+                last_end = self.chapter_table.item(rows - 1, 3)
+                if last_end:
+                    last_end.setText(str(self._total_pdf_pages))
+        finally:
+            self.chapter_table.blockSignals(False)
+        self._validate_all_rows()
+
+    # ------------------------------------------------------------------ #
+    #  优先级 3 — 层级单击循环切换                                         #
+    # ------------------------------------------------------------------ #
+
+    def _on_cell_clicked(self, row: int, col: int):
+        """单击层级列：L1 → L2 → L3 → L1 循环切换。"""
+        if col != 0:
+            return
+        item = self.chapter_table.item(row, 0)
+        if not item:
+            return
+        cycle = {'L1': 'L2', 'L2': 'L3', 'L3': 'L1'}
+        self.chapter_table.blockSignals(True)
+        item.setText(cycle.get(item.text(), 'L1'))
+        self.chapter_table.blockSignals(False)
+        self._validate_all_rows()
+
+    # ------------------------------------------------------------------ #
+    #  优先级 4 — 实时页码合法性验证（兼负责所有行着色）                    #
+    # ------------------------------------------------------------------ #
+
+    _ERROR_COLOR = "#FFCCCC"   # 红：start > end 或超出总页数
+    _WARN_COLOR  = "#FFE4B5"   # 橙：与相邻章节页码重叠
+
+    def _validate_all_rows(self):
+        """
+        遍历所有行：
+        - 正常行：显示对应层级的背景色
+        - 页码错误（start > end / 超出总页数）：红色
+        - 与上一行页码重叠：橙色
+        同时触发 chapter_table 重绘，使缩进代理刷新。
+        """
+        rows = self.chapter_table.rowCount()
+        for i in range(rows):
+            # 读层级
+            try:
+                level = int(self.chapter_table.item(i, 0).text().lstrip('L'))
+            except (ValueError, AttributeError):
+                level = 1
+
+            # 读页码
+            try:
+                start = int(self.chapter_table.item(i, 2).text())
+                end   = int(self.chapter_table.item(i, 3).text())
+                pages_valid = True
+            except (ValueError, AttributeError):
+                start = end = 0
+                pages_valid = False
+
+            # 判断错误类型
+            has_error = pages_valid and (
+                start > end or
+                (self._total_pdf_pages > 0 and end > self._total_pdf_pages)
+            )
+            has_overlap = False
+            if not has_error and pages_valid and i > 0:
+                try:
+                    prev_end = int(self.chapter_table.item(i - 1, 3).text())
+                    has_overlap = start <= prev_end
+                except (ValueError, AttributeError):
+                    pass
+
+            # 选色
+            if has_error:
+                color = QColor(self._ERROR_COLOR)
+            elif has_overlap:
+                color = QColor(self._WARN_COLOR)
+            else:
+                color = QColor(self._LEVEL_COLORS.get(level, '#FFFFFF'))
+
+            for col in range(self.chapter_table.columnCount()):
+                it = self.chapter_table.item(i, col)
+                if it:
+                    it.setBackground(color)
+
+        # 强制刷新代理（缩进绘制）
+        self.chapter_table.viewport().update()
+
     def delete_selected_chapter(self):
         """删除选中的章节"""
         current_row = self.chapter_table.currentRow()
         if current_row >= 0:
+            self.chapter_table.blockSignals(True)
             self.chapter_table.removeRow(current_row)
+            self.chapter_table.blockSignals(False)
+            self._validate_all_rows()
 
     def delete_before_chapters(self):
         """删除当前章节之前的所有章节"""
@@ -1236,12 +1485,15 @@ class MainWindow(QMainWindow):
         if current_row < 0:
             QMessageBox.warning(self, "错误", "请先选择一个章节")
             return
-        
+
         reply = QMessageBox.question(self, "确认删除", f"确定要删除第 {current_row + 1} 章之前的所有章节吗？",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
+            self.chapter_table.blockSignals(True)
             for i in range(current_row - 1, -1, -1):
                 self.chapter_table.removeRow(i)
+            self.chapter_table.blockSignals(False)
+            self._validate_all_rows()
 
     def delete_after_chapters(self):
         """删除当前章节之后的所有章节"""
@@ -1253,17 +1505,29 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(self, "确认删除", f"确定要删除第 {current_row + 1} 章之后的所有章节吗？",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
+            self.chapter_table.blockSignals(True)
             for i in range(self.chapter_table.rowCount() - 1, current_row, -1):
                 self.chapter_table.removeRow(i)
+            self.chapter_table.blockSignals(False)
+            self._validate_all_rows()
 
     def add_chapter(self, row=-1):
-        """添加章节"""
+        """添加章节（默认一级）"""
         if row == -1:
             row = self.chapter_table.rowCount()
-        self.chapter_table.insertRow(row)
-        self.chapter_table.setItem(row, 0, QTableWidgetItem("新章节"))
-        self.chapter_table.setItem(row, 1, QTableWidgetItem("0"))
-        self.chapter_table.setItem(row, 2, QTableWidgetItem("0"))
+        self.chapter_table.blockSignals(True)
+        try:
+            self.chapter_table.insertRow(row)
+            level_item = QTableWidgetItem("L1")
+            level_item.setTextAlignment(Qt.AlignCenter)
+            level_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.chapter_table.setItem(row, 0, level_item)
+            self.chapter_table.setItem(row, 1, QTableWidgetItem("新章节"))
+            self.chapter_table.setItem(row, 2, QTableWidgetItem("0"))
+            self.chapter_table.setItem(row, 3, QTableWidgetItem("0"))
+        finally:
+            self.chapter_table.blockSignals(False)
+        self._validate_all_rows()
 
     def save_chapters(self):
         """保存章节"""
@@ -1276,12 +1540,14 @@ class MainWindow(QMainWindow):
         chapters = []
         for i in range(self.chapter_table.rowCount()):
             try:
-                title = self.chapter_table.item(i, 0).text()
-                start_page = int(self.chapter_table.item(i, 1).text())
-                end_page = int(self.chapter_table.item(i, 2).text())
-                chapters.append({"title": title, "start_page": start_page, "end_page": end_page})
+                level_text = self.chapter_table.item(i, 0).text().lstrip("L")
+                level = int(level_text)
+                title = self.chapter_table.item(i, 1).text()
+                start_page = int(self.chapter_table.item(i, 2).text())
+                end_page = int(self.chapter_table.item(i, 3).text())
+                chapters.append({"level": level, "title": title, "start_page": start_page, "end_page": end_page})
             except (ValueError, AttributeError):
-                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的页码无效，请检查。")
+                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行数据无效，请检查。")
                 return
 
         metadata = {"status": "完成章节编辑", "chapters": chapters}
@@ -1307,6 +1573,8 @@ class MainWindow(QMainWindow):
         if not self.current_book_path:
             return
 
+        self._load_total_pages()  # 优先级 2：读取总页数
+
         metadata = self.book_manager.get_book_metadata(self.current_book_path)
         
         # 如果有元数据且状态不是"未处理"，则从元数据中读取章节信息
@@ -1321,25 +1589,40 @@ class MainWindow(QMainWindow):
             self.update_chapter_table([])
             self.update_button_states()
             return
-            
-        bookmarks = get_bookmarks(pdf_path)
-        for i, bookmark in enumerate(bookmarks):
-            if i + 1 < len(bookmarks):
-                bookmark["end_page"] = bookmarks[i+1]["page"] - 1
-            else:
-                bookmark["end_page"] = bookmark["page"]
-        
-        chapters = [{"title": b["title"], "start_page": b["page"], "end_page": b["end_page"]} for b in bookmarks]
+
+        bookmarks = get_bookmarks(pdf_path)  # 已包含 level 和 end_page
+        chapters = [
+            {
+                "title": b["title"],
+                "start_page": b["page"],
+                "end_page": b["end_page"],
+                "level": b["level"],
+            }
+            for b in bookmarks
+        ]
         self.update_chapter_table(chapters)
         self.update_button_states()
 
+    # 各层级行背景色
+    _LEVEL_COLORS = {1: "#D6EAF8", 2: "#FFFFFF", 3: "#E9F7EF"}
+
     def update_chapter_table(self, chapters):
-        """更新章节表格"""
-        self.chapter_table.setRowCount(len(chapters))
-        for i, chapter in enumerate(chapters):
-            self.chapter_table.setItem(i, 0, QTableWidgetItem(chapter["title"]))
-            self.chapter_table.setItem(i, 1, QTableWidgetItem(str(chapter["start_page"])))
-            self.chapter_table.setItem(i, 2, QTableWidgetItem(str(chapter["end_page"])))
+        """更新章节表格（支持三级层次）"""
+        self.chapter_table.blockSignals(True)
+        try:
+            self.chapter_table.setRowCount(len(chapters))
+            for i, chapter in enumerate(chapters):
+                level = chapter.get("level", 1)
+                level_item = QTableWidgetItem(f"L{level}")
+                level_item.setTextAlignment(Qt.AlignCenter)
+                level_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                self.chapter_table.setItem(i, 0, level_item)
+                self.chapter_table.setItem(i, 1, QTableWidgetItem(chapter["title"]))
+                self.chapter_table.setItem(i, 2, QTableWidgetItem(str(chapter["start_page"])))
+                self.chapter_table.setItem(i, 3, QTableWidgetItem(str(chapter["end_page"])))
+        finally:
+            self.chapter_table.blockSignals(False)
+        self._validate_all_rows()  # 统一着色 + 验证
 
     def update_button_states(self):
         """更新按钮的启用状态"""
@@ -1379,16 +1662,18 @@ class MainWindow(QMainWindow):
             self.upload_book_button.setText("上传书籍")
 
     def _get_chapters_from_table(self):
-        """从章节表格读取章节数据，出错返回 None。"""
+        """从章节表格读取章节数据（含层级），出错返回 None。"""
         chapters = []
         for i in range(self.chapter_table.rowCount()):
             try:
-                title = self.chapter_table.item(i, 0).text()
-                start_page = int(self.chapter_table.item(i, 1).text())
-                end_page = int(self.chapter_table.item(i, 2).text())
-                chapters.append({"title": title, "start_page": start_page, "end_page": end_page})
+                level_text = self.chapter_table.item(i, 0).text().lstrip("L")
+                level = int(level_text)
+                title = self.chapter_table.item(i, 1).text()
+                start_page = int(self.chapter_table.item(i, 2).text())
+                end_page = int(self.chapter_table.item(i, 3).text())
+                chapters.append({"level": level, "title": title, "start_page": start_page, "end_page": end_page})
             except (ValueError, AttributeError):
-                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的页码或标题无效，请检查。")
+                QMessageBox.warning(self, "输入错误", f"第 {i+1} 行的数据无效，请检查。")
                 return None
         return chapters
 

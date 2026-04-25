@@ -8,6 +8,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Callable, Optional, Tuple
 from .json_to_markdown import JSONToMarkdownConverter
+from .pdf_processor import get_leaf_chapters
 
 DEFAULT_MINERU_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_MINERU_LANGUAGE = "ch"
@@ -72,43 +73,27 @@ class ConfigManager:
         }
     
     def get_llm_config(self) -> Dict:
-        """获取LLM配置"""
+        """获取LLM配置（统一单套 key/url/model，无供应商概念）"""
         if not self.config.has_section('LLM'):
             return {
-                'provider': 'DeepSeek',
-                'model_name': 'deepseek-chat',
+                'api_key': '',
+                'base_url': '',
+                'model_name': '',
                 'temperature': 0.7,
                 'max_tokens': 2000,
                 'prompt': self._get_default_system_prompt(),
                 'max_concurrent_calls': 5
             }
-        
+
         section = self.config['LLM']
         return {
-            'provider': section.get('provider', 'DeepSeek'),
-            'model_name': section.get('model_name', 'deepseek-chat'),
+            'api_key': section.get('api_key', ''),
+            'base_url': section.get('base_url', ''),
+            'model_name': section.get('model_name', ''),
             'temperature': section.getfloat('temperature', 0.7),
             'max_tokens': section.getint('max_tokens', 2000),
             'prompt': section.get('prompt', self._get_default_system_prompt()),
             'max_concurrent_calls': section.getint('max_concurrent_llm_calls', 5)
-        }
-
-    def get_provider_config(self, provider: str) -> Dict:
-        """获取指定LLM提供商的配置"""
-        section_name = provider
-        if not self.config.has_section(section_name):
-            if provider == "DeepSeek":
-                return self._get_default_deepseek_config()
-            elif provider == "Gemini":
-                return self._get_default_gemini_config()
-            elif provider == "中转站":
-                return self._get_default_zenmux_config()
-            return {}
-            
-        section = self.config[section_name]
-        return {
-            'api_key': section.get('api_key', ''),
-            'base_url': section.get('base_url', '')
         }
     
     def _get_default_mineru_config(self) -> Dict:
@@ -155,16 +140,16 @@ class ConfigManager:
 
 
 class LLMAPI:
-    """通用LLM API调用处理器"""
-    
+    """通用LLM API调用处理器（OpenAI 兼容接口，单套 key/url/model）"""
+
     def __init__(self, config_manager: ConfigManager):
         self.config_manager = config_manager
         self.llm_config = self.config_manager.get_llm_config()
-        self.provider = self.llm_config['provider']
-        self.provider_config = self.config_manager.get_provider_config(self.provider)
-        
-        if not self.provider_config.get('api_key'):
-            raise ValueError(f"{self.provider} API Key未配置")
+
+        if not self.llm_config.get('api_key'):
+            raise ValueError("LLM API Key 未配置，请在「工具 → 设置 → LLM设置」中填写")
+        if not self.llm_config.get('base_url'):
+            raise ValueError("LLM Base URL 未配置，请在「工具 → 设置 → LLM设置」中填写")
 
     def analyze_text(self, text: str) -> Optional[Dict]:
         """
@@ -213,11 +198,11 @@ class LLMAPI:
         return f"{response.status_code} {response.reason}: {error}"
 
     def _call_openai_compat(self, text: str) -> Optional[Dict]:
-        """统一的 OpenAI 兼容接口调用（DeepSeek / Gemini / 中转站 均适用）。"""
-        url = f"{self.provider_config['base_url']}/chat/completions"
+        """统一的 OpenAI 兼容接口调用。"""
+        url = f"{self.llm_config['base_url']}/chat/completions"
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': f"Bearer {self.provider_config['api_key']}"
+            'Authorization': f"Bearer {self.llm_config['api_key']}"
         }
         payload = {
             "model": self.llm_config['model_name'],
@@ -647,13 +632,13 @@ class APIHandler:
                     log_callback("章节PDF目录不存在，请先进行章节切分")
                 return False
             
-            # 收集章节文件
+            # 仅收集叶子章节对应的 PDF 文件（编号与 split_pdf_by_chapters 一致）
+            leaf_chapters = get_leaf_chapters(chapters)
             chapter_files = []
-            for i, chapter in enumerate(chapters):
-                # 使用与pdf_processor.py中一致的简单命名规则
+            for i, chapter in enumerate(leaf_chapters):
                 chapter_filename = f"{i+1:02d}.pdf"
                 chapter_path = os.path.join(chapters_pdf_dir, chapter_filename)
-                
+
                 if os.path.exists(chapter_path):
                     chapter_files.append(chapter_path)
                 else:
@@ -772,17 +757,18 @@ class APIHandler:
             llm_result_dir = os.path.join(book_path, "LLM_result")
             os.makedirs(llm_result_dir, exist_ok=True)
             
+            # 仅分析叶子章节（编号与 PDF 切分 / MinerU / JSON 转 MD 保持一致）
+            leaf_chapters = get_leaf_chapters(chapters)
             if log_callback:
-                log_callback(f"开始分析 {len(chapters)} 个章节...")
-            
+                log_callback(f"开始分析 {len(leaf_chapters)} 个叶子章节...")
+
             llm_config = self.config_manager.get_llm_config()
-            max_concurrent_calls = llm_config.get('max_concurrent_calls', 5) # 从配置中获取最大并发数
-            
+            max_concurrent_calls = llm_config.get('max_concurrent_calls', 5)
+
             success_count = 0
-            
+
             def _analyze_single_chapter(i: int, chapter: Dict) -> bool:
-                """内部函数，用于处理单个章节的LLM分析"""
-                # 使用与pdf_processor.py和MinerU处理中一致的简单命名规则
+                """内部函数，用于处理单个叶子章节的LLM分析"""
                 markdown_filename = f"{i+1:02d}.md"
                 markdown_path = os.path.join(chapters_markdown_dir, markdown_filename)
                 
@@ -806,7 +792,7 @@ class APIHandler:
                     analysis_result = llm_api.analyze_text(markdown_content)
                     if not analysis_result or 'content' not in analysis_result:
                         if log_callback:
-                            log_callback(f"{llm_api.provider} API返回结果异常")
+                            log_callback("LLM API 返回结果异常")
                         return False
                     
                     analysis_content = analysis_result['content']
@@ -836,14 +822,17 @@ class APIHandler:
                     return False
             
             with ThreadPoolExecutor(max_workers=max_concurrent_calls) as executor:
-                futures = {executor.submit(_analyze_single_chapter, i, chapter): (i, chapter) for i, chapter in enumerate(chapters)}
-                
+                futures = {
+                    executor.submit(_analyze_single_chapter, i, chapter): (i, chapter)
+                    for i, chapter in enumerate(leaf_chapters)
+                }
+
                 for future in as_completed(futures):
                     if future.result():
                         success_count += 1
-            
+
             if log_callback:
-                log_callback(f"章节分析完成: {success_count}/{len(chapters)} 个章节成功")
+                log_callback(f"章节分析完成: {success_count}/{len(leaf_chapters)} 个章节成功")
                 log_callback(f"分析结果保存在: {llm_result_dir}")
             
             return success_count > 0

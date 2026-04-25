@@ -10,7 +10,10 @@
       "Bash(ldd /home/terrariver/projects/Academic_Book_Analyze_Tool/.venv/lib/python3.12/site-packages/PySide6/Qt/plugins/platforms/libqxcb.so)",
       "WebFetch(domain:mineru.net)",
       "Bash(curl -s https://mineru.net/apiManage/docs)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('ui/main_window.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('ui/settings_dialog.py'\\).read\\(\\)\\); print\\('settings OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('core/api_handler.py'\\).read\\(\\)\\); print\\('api OK'\\)\")"
     ]
   }
 }

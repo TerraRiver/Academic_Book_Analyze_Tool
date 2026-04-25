@@ -1,60 +1,95 @@
 from pypdf import PdfReader, PdfWriter
 import os
 
-def get_bookmarks(pdf_path: str) -> list:
-    """
-    从 PDF 文件中提取书签（大纲）。
 
-    :param pdf_path: PDF 文件的路径。
-    :return: 一个包含书签信息的列表，每个元素是一个元组 (title, page_number)。
+def get_bookmarks(pdf_path: str, max_level: int = 3) -> list:
+    """
+    从 PDF 文件中提取书签（大纲），支持最多 max_level 级层次。
+
+    返回列表，每项包含:
+        title     - 书签标题
+        page      - 起始页码（1-based）
+        end_page  - 结束页码（1-based）
+        level     - 层级（1 ~ max_level）
     """
     bookmarks = []
     try:
         reader = PdfReader(pdf_path)
-        for item in reader.outline:
-            # 我们只处理顶层书签
-            if isinstance(item, list):
-                # 忽略嵌套书签
-                continue
-            bookmarks.append({
-                "title": item.title,
-                "page": reader.get_destination_page_number(item) + 1 # pypdf 页码从0开始，我们转换为从1开始
-            })
+        total_pages = len(reader.pages)
+
+        def process_outline(items, level=1):
+            if level > max_level:
+                return
+            for item in items:
+                if isinstance(item, list):
+                    # 子书签列表，递归处理，层级 +1
+                    process_outline(item, level + 1)
+                else:
+                    try:
+                        page = reader.get_destination_page_number(item) + 1
+                        bookmarks.append({
+                            "title": item.title,
+                            "page": page,
+                            "level": level,
+                        })
+                    except Exception:
+                        pass
+
+        process_outline(reader.outline)
+
+        # 为每个书签计算结束页：找到下一个同级或更高级的书签
+        for i, bm in enumerate(bookmarks):
+            next_page = total_pages + 1
+            for j in range(i + 1, len(bookmarks)):
+                if bookmarks[j]["level"] <= bm["level"]:
+                    next_page = bookmarks[j]["page"]
+                    break
+            bm["end_page"] = next_page - 1
+
     except Exception as e:
         print(f"读取书签时出错: {e}")
     return bookmarks
 
+
+def get_leaf_chapters(chapters: list) -> list:
+    """
+    筛选叶子章节（无直接子章节），作为 OCR / LLM 分析的实际处理单元。
+
+    判断规则：若下一条目的 level <= 本条目的 level，则本条目为叶子节点。
+    若章节列表不含层级信息（旧数据 level 均默认为 1），全部视为叶子节点（向后兼容）。
+    """
+    leaf = []
+    for i, chapter in enumerate(chapters):
+        level = chapter.get("level", 1)
+        next_level = chapters[i + 1].get("level", 1) if i + 1 < len(chapters) else 0
+        if next_level <= level:
+            leaf.append(chapter)
+    return leaf
+
+
 def split_pdf_by_chapters(original_pdf_path: str, chapters: list, output_dir: str):
     """
-    根据章节信息切分PDF。
-
-    :param original_pdf_path: 原始PDF文件的路径。
-    :param chapters: 包含章节信息的列表，每个元素是一个字典，包含 title, start_page, end_page。
-    :param output_dir: 切分后的PDF文件的输出目录。
+    根据章节信息切分 PDF，仅切分叶子章节。
+    输出文件按序命名为 01.pdf, 02.pdf …
     """
     try:
         os.makedirs(output_dir, exist_ok=True)
         reader = PdfReader(original_pdf_path)
-        
-        for i, chapter in enumerate(chapters):
+        leaf_chapters = get_leaf_chapters(chapters)
+
+        for seq_idx, chapter in enumerate(leaf_chapters):
             writer = PdfWriter()
             start_page = chapter["start_page"]
             end_page = chapter["end_page"]
-            
-            # 将页码从1开始转换回0开始
+
             for page_num in range(start_page - 1, end_page):
                 writer.add_page(reader.pages[page_num])
-            
-            # 使用简单、健壮的索引作为文件名，避免非法字符问题
-            output_filename = os.path.join(output_dir, f"{i+1:02d}.pdf")
-            
-            # 将章节标题添加到PDF元数据中，以便追溯
-            writer.add_metadata({
-                "/Title": chapter['title']
-            })
 
+            output_filename = os.path.join(output_dir, f"{seq_idx + 1:02d}.pdf")
+            writer.add_metadata({"/Title": chapter["title"]})
             with open(output_filename, "wb") as f:
                 writer.write(f)
+
         return True, ""
     except Exception as e:
         return False, f"切分PDF时出错: {e}"

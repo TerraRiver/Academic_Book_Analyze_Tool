@@ -2,6 +2,7 @@ import json
 import os
 import re
 from typing import Dict, List, Any, Optional
+from .pdf_processor import get_leaf_chapters
 
 class JSONToMarkdownConverter:
     """将MinerU解析的JSON结果转换为带页码的Markdown格式"""
@@ -245,12 +246,15 @@ class JSONToMarkdownConverter:
                 log_callback("开始将JSON转换为Markdown...")
             
             processed_count = 0
-            
-            # 遍历所有章节
-            for i, chapter in enumerate(chapters):
+
+            # 仅处理叶子章节（与 split_pdf_by_chapters / analyze_chapters 保持一致的编号）
+            leaf_chapters = get_leaf_chapters(chapters)
+
+            # 遍历叶子章节
+            for i, chapter in enumerate(leaf_chapters):
                 chapter_title = chapter.get('title', f'Chapter_{i+1}')
                 start_page = chapter.get('start_page', 1)
-                
+
                 # 使用新的、基于索引的命名规则
                 chapter_dir_name = f"{i+1:02d}"
                 chapter_json_dir = os.path.join(mineru_json_dir, chapter_dir_name)
@@ -301,8 +305,8 @@ class JSONToMarkdownConverter:
                             log_callback(f"  - 转换失败: {os.path.basename(json_file)}")
             
             if log_callback:
-                log_callback(f"JSON转Markdown完成! 共处理了 {processed_count} 个章节")
-            
+                log_callback(f"JSON转Markdown完成! 共处理了 {processed_count}/{len(leaf_chapters)} 个叶子章节")
+
             return processed_count > 0
         
         except Exception as e:

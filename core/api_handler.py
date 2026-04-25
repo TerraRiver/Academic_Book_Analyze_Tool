@@ -8,7 +8,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Callable, Optional, Tuple
 from .json_to_markdown import JSONToMarkdownConverter
-from .pdf_processor import get_leaf_chapters
+from .pdf_processor import get_leaf_chapters, enrich_chapters
 
 DEFAULT_MINERU_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_MINERU_LANGUAGE = "ch"
@@ -19,6 +19,26 @@ DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 DEFAULT_ZENMUX_BASE_URL = "https://zenmux.ai/api/v1"
 DEFAULT_ZENMUX_MODEL_NAME = "google/gemini-3.1-pro-preview"
+PARENT_CHAPTER_ANALYSIS_PREFIX = "parent_"
+
+TOP_LEVEL_SUMMARY_PROMPT = """你是一位读书理解能力很强的学者，你的任务就是根据我发送给你的图书的章节原文，帮我按以下要求梳理总结，写成两个部分：
+
+1. 写一下这整个章节内容的摘要（一~二个自然段，500字以内）
+2. 梳理作者在这一上级章节中的思维逻辑链条，说明作者如何展开论述、各部分之间如何递进、如何从问题推进到结论（用有序列表的形式来写）。
+
+输出要求：
+- 不要编造未提供的信息。
+- 语言简洁、学术、结构清楚。
+"""
+
+MID_LEVEL_SUMMARY_PROMPT = """你是一位读书理解能力很强的学者，你的任务就是根据我发送给你的图书的章节原文，帮我按以下要求梳理总结：
+
+1. 写一下这整个章节内容的摘要（一个自然段，250字以内）
+
+输出要求：
+- 不要编造未提供的信息。
+- 语言简洁、学术、结构清楚。
+"""
 
 
 def normalize_mineru_language(language: str) -> str:
@@ -82,7 +102,8 @@ class ConfigManager:
                 'temperature': 0.7,
                 'max_tokens': 2000,
                 'prompt': self._get_default_system_prompt(),
-                'max_concurrent_calls': 5
+                'max_concurrent_calls': 5,
+                'enable_parent_summary_analysis': True,
             }
 
         section = self.config['LLM']
@@ -93,7 +114,8 @@ class ConfigManager:
             'temperature': section.getfloat('temperature', 0.7),
             'max_tokens': section.getint('max_tokens', 2000),
             'prompt': section.get('prompt', self._get_default_system_prompt()),
-            'max_concurrent_calls': section.getint('max_concurrent_llm_calls', 5)
+            'max_concurrent_calls': section.getint('max_concurrent_llm_calls', 5),
+            'enable_parent_summary_analysis': section.getboolean('enable_parent_summary_analysis', True),
         }
     
     def _get_default_mineru_config(self) -> Dict:
@@ -151,7 +173,7 @@ class LLMAPI:
         if not self.llm_config.get('base_url'):
             raise ValueError("LLM Base URL 未配置，请在「工具 → 设置 → LLM设置」中填写")
 
-    def analyze_text(self, text: str) -> Optional[Dict]:
+    def analyze_text(self, text: str, system_prompt: Optional[str] = None) -> Optional[Dict]:
         """
         使用所选的LLM API分析文本，并加入指数退避重试机制。
         
@@ -166,7 +188,7 @@ class LLMAPI:
 
         for attempt in range(max_retries):
             try:
-                return self._call_openai_compat(text)
+                return self._call_openai_compat(text, system_prompt=system_prompt)
             except requests.exceptions.RequestException as e:
                 status_code = e.response.status_code if e.response is not None else None
                 # 对 429 (限流) 和 5xx (服务器错误) 进行重试
@@ -197,7 +219,7 @@ class LLMAPI:
             return f"{response.status_code} {response.reason}: {response_preview}"
         return f"{response.status_code} {response.reason}: {error}"
 
-    def _call_openai_compat(self, text: str) -> Optional[Dict]:
+    def _call_openai_compat(self, text: str, system_prompt: Optional[str] = None) -> Optional[Dict]:
         """统一的 OpenAI 兼容接口调用。"""
         url = f"{self.llm_config['base_url']}/chat/completions"
         headers = {
@@ -207,7 +229,7 @@ class LLMAPI:
         payload = {
             "model": self.llm_config['model_name'],
             "messages": [
-                {"role": "system", "content": self.llm_config['prompt']},
+                {"role": "system", "content": system_prompt or self.llm_config['prompt']},
                 {"role": "user", "content": text}
             ],
             "temperature": self.llm_config['temperature'],
@@ -728,8 +750,8 @@ class APIHandler:
             return False
 
     def analyze_chapters(self, book_path: str, chapters: List[Dict],
-                       status_callback: Optional[Callable] = None,
-                       log_callback: Optional[Callable] = None) -> bool:
+                        status_callback: Optional[Callable] = None,
+                        log_callback: Optional[Callable] = None) -> bool:
         """
         使用DeepSeek分析章节Markdown内容
         
@@ -757,13 +779,14 @@ class APIHandler:
             llm_result_dir = os.path.join(book_path, "LLM_result")
             os.makedirs(llm_result_dir, exist_ok=True)
             
-            # 仅分析叶子章节（编号与 PDF 切分 / MinerU / JSON 转 MD 保持一致）
-            leaf_chapters = get_leaf_chapters(chapters)
+            enriched_chapters = enrich_chapters(chapters)
+            leaf_chapters = [chapter for chapter in enriched_chapters if chapter.get("is_leaf")]
             if log_callback:
                 log_callback(f"开始分析 {len(leaf_chapters)} 个叶子章节...")
 
             llm_config = self.config_manager.get_llm_config()
             max_concurrent_calls = llm_config.get('max_concurrent_calls', 5)
+            enable_parent_summary_analysis = llm_config.get('enable_parent_summary_analysis', True)
 
             success_count = 0
 
@@ -771,6 +794,7 @@ class APIHandler:
                 """内部函数，用于处理单个叶子章节的LLM分析"""
                 markdown_filename = f"{i+1:02d}.md"
                 markdown_path = os.path.join(chapters_markdown_dir, markdown_filename)
+                display_title = chapter.get('display_title', chapter['title'])
                 
                 if not os.path.exists(markdown_path):
                     if log_callback:
@@ -778,7 +802,7 @@ class APIHandler:
                     return False
                 
                 if log_callback:
-                    log_callback(f"正在分析章节 {i+1}: {chapter['title']}")
+                    log_callback(f"正在分析切片 {i+1}: {display_title}")
                 
                 try:
                     with open(markdown_path, 'r', encoding='utf-8') as f:
@@ -801,24 +825,24 @@ class APIHandler:
                     analysis_path = os.path.join(llm_result_dir, analysis_filename)
                     
                     with open(analysis_path, 'w', encoding='utf-8') as f:
-                        f.write(f"# {chapter['title']} - LLM分析结果\n\n")
+                        f.write(f"# {display_title} - LLM分析结果\n\n")
                         f.write(f"**章节页码范围:** {chapter.get('start_page', 'N/A')} - {chapter.get('end_page', 'N/A')}\n\n")
                         f.write(f"**分析时间:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                         f.write("---\n\n")
                         f.write(analysis_content)
                     
                     if log_callback:
-                        log_callback(f"章节 {i+1} 分析完成，结果已保存: {analysis_filename}")
+                        log_callback(f"切片 {i+1} 分析完成，结果已保存: {analysis_filename}")
                     
                     if status_callback:
                         status_callback({
-                            chapter['title']: "completed"
+                            display_title: "completed"
                         })
                     return True
                     
                 except Exception as e:
                     if log_callback:
-                        log_callback(f"分析章节 {chapter['title']} 失败: {str(e)}")
+                        log_callback(f"分析章节 {display_title} 失败: {str(e)}")
                     return False
             
             with ThreadPoolExecutor(max_workers=max_concurrent_calls) as executor:
@@ -832,7 +856,24 @@ class APIHandler:
                         success_count += 1
 
             if log_callback:
-                log_callback(f"章节分析完成: {success_count}/{len(leaf_chapters)} 个章节成功")
+                log_callback(f"子切片分析完成: {success_count}/{len(leaf_chapters)} 个切片成功")
+            parent_success_count = 0
+            if enable_parent_summary_analysis:
+                parent_success_count = self._analyze_parent_chapters(
+                    llm_api=llm_api,
+                    chapters_markdown_dir=chapters_markdown_dir,
+                    llm_result_dir=llm_result_dir,
+                    chapters=enriched_chapters,
+                    leaf_chapters=leaf_chapters,
+                    status_callback=status_callback,
+                    log_callback=log_callback,
+                    max_concurrent_calls=max_concurrent_calls,
+                )
+            if log_callback:
+                if enable_parent_summary_analysis and parent_success_count > 0:
+                    log_callback(f"上级章节补充分析完成: {parent_success_count} 个章节成功")
+                elif not enable_parent_summary_analysis:
+                    log_callback("已跳过上级章节总结分析（设置中已关闭）")
                 log_callback(f"分析结果保存在: {llm_result_dir}")
             
             return success_count > 0
@@ -841,3 +882,143 @@ class APIHandler:
             if log_callback:
                 log_callback(f"分析章节时发生错误: {str(e)}")
             return False
+
+    def _chapter_key(self, chapter: Dict) -> Tuple[int, str, int, int]:
+        return (
+            int(chapter.get("level", 1)),
+            chapter.get("title", ""),
+            int(chapter.get("start_page", 0)),
+            int(chapter.get("end_page", 0)),
+        )
+
+    def _build_leaf_markdown_map(self, chapters_markdown_dir: str, leaf_chapters: List[Dict],
+                                 log_callback: Optional[Callable] = None) -> Dict[Tuple[int, str, int, int], str]:
+        leaf_markdown_map = {}
+        for i, chapter in enumerate(leaf_chapters):
+            markdown_filename = f"{i+1:02d}.md"
+            markdown_path = os.path.join(chapters_markdown_dir, markdown_filename)
+            if not os.path.exists(markdown_path):
+                if log_callback:
+                    log_callback(f"警告: Markdown文件不存在: {markdown_path}")
+                continue
+            try:
+                with open(markdown_path, 'r', encoding='utf-8') as f:
+                    leaf_markdown_map[self._chapter_key(chapter)] = f.read()
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"读取Markdown文件失败: {str(e)}")
+        return leaf_markdown_map
+
+    def _get_descendant_leaf_chapters(self, chapters: List[Dict], row_index: int) -> List[Dict]:
+        parent = chapters[row_index]
+        parent_level = parent.get("level", 1)
+        descendants = []
+        for i in range(row_index + 1, len(chapters)):
+            current = chapters[i]
+            current_level = current.get("level", 1)
+            if current_level <= parent_level:
+                break
+            if current.get("is_leaf"):
+                descendants.append(current)
+        return descendants
+
+    def _build_parent_markdown(self, parent: Dict, descendant_leaf_chapters: List[Dict],
+                               leaf_markdown_map: Dict[Tuple[int, str, int, int], str]) -> str:
+        segments = []
+        for leaf in descendant_leaf_chapters:
+            markdown_content = leaf_markdown_map.get(self._chapter_key(leaf))
+            if not markdown_content:
+                continue
+            segments.append(
+                f"# 下级章节：{leaf.get('display_title', leaf.get('title', '未命名章节'))}\n\n{markdown_content}"
+            )
+        if not segments:
+            return ""
+        return (
+            f"# 上级章节：{parent.get('display_title', parent.get('title', '未命名章节'))}\n\n"
+            + "\n\n---\n\n".join(segments)
+        )
+
+    def _get_parent_prompt(self, chapter: Dict) -> Optional[str]:
+        level = int(chapter.get("level", 1))
+        if level == 1:
+            return TOP_LEVEL_SUMMARY_PROMPT
+        if level == 2:
+            return MID_LEVEL_SUMMARY_PROMPT
+        return None
+
+    def _save_parent_analysis(self, llm_result_dir: str, chapter: Dict, analysis_content: str):
+        output_filename = (
+            f"{PARENT_CHAPTER_ANALYSIS_PREFIX}"
+            f"{chapter.get('_source_index', 0) + 1:02d}_analysis.md"
+        )
+        output_path = os.path.join(llm_result_dir, output_filename)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(f"# {chapter.get('display_title', chapter.get('title', '未命名章节'))} - 上级章节分析结果\n\n")
+            f.write(f"**章节页码范围:** {chapter.get('start_page', 'N/A')} - {chapter.get('end_page', 'N/A')}\n\n")
+            f.write(f"**分析时间:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("---\n\n")
+            f.write(analysis_content)
+
+    def _analyze_parent_chapters(self, llm_api: 'LLMAPI', chapters_markdown_dir: str, llm_result_dir: str,
+                                 chapters: List[Dict], leaf_chapters: List[Dict],
+                                 status_callback: Optional[Callable] = None,
+                                 log_callback: Optional[Callable] = None,
+                                 max_concurrent_calls: int = 5) -> int:
+        parent_targets = []
+        for i, chapter in enumerate(chapters):
+            if chapter.get("is_leaf"):
+                continue
+            if self._get_parent_prompt(chapter) is None:
+                continue
+            descendant_leaf_chapters = self._get_descendant_leaf_chapters(chapters, i)
+            if descendant_leaf_chapters:
+                parent_targets.append((i, chapter, descendant_leaf_chapters))
+
+        if not parent_targets:
+            return 0
+
+        leaf_markdown_map = self._build_leaf_markdown_map(chapters_markdown_dir, leaf_chapters, log_callback)
+        success_count = 0
+
+        def _analyze_single_parent(target: Tuple[int, Dict, List[Dict]]) -> bool:
+            _, chapter, descendant_leaf_chapters = target
+            display_title = chapter.get('display_title', chapter.get('title', '未命名切片'))
+            if log_callback:
+                log_callback(f"正在分析上级切片: {display_title}")
+
+            markdown_content = self._build_parent_markdown(chapter, descendant_leaf_chapters, leaf_markdown_map)
+            if not markdown_content.strip():
+                if log_callback:
+                    log_callback(f"警告: 上级切片缺少可用的下级Markdown内容: {display_title}")
+                return False
+
+            prompt = self._get_parent_prompt(chapter)
+            try:
+                analysis_result = llm_api.analyze_text(markdown_content, system_prompt=prompt)
+                if not analysis_result or 'content' not in analysis_result:
+                    if log_callback:
+                        log_callback(f"上级章节分析返回结果异常: {display_title}")
+                    return False
+
+                self._save_parent_analysis(llm_result_dir, chapter, analysis_result['content'])
+                if log_callback:
+                    log_callback(f"上级章节分析完成: {display_title}")
+                if status_callback:
+                    status_callback({display_title: "completed"})
+                return True
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"分析上级章节 {display_title} 失败: {str(e)}")
+                return False
+
+        with ThreadPoolExecutor(max_workers=max_concurrent_calls) as executor:
+            futures = {
+                executor.submit(_analyze_single_parent, target): target
+                for target in parent_targets
+            }
+            for future in as_completed(futures):
+                if future.result():
+                    success_count += 1
+
+        return success_count

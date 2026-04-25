@@ -11,6 +11,9 @@ from docx.enum.section import WD_SECTION_START
 from docx.enum.section import WD_ORIENT
 from docx.shared import Cm
 from typing import List, Dict, Optional, Callable
+from .pdf_processor import get_leaf_chapters, enrich_chapters
+
+PARENT_CHAPTER_ANALYSIS_PREFIX = "parent_"
 
 class ReportGenerator:
     """
@@ -22,11 +25,11 @@ class ReportGenerator:
         self.llm_result_dir = os.path.join(book_path, "LLM_result")
         self.log_callback = log_callback
         self.document = Document()
+        self.config = configparser.ConfigParser()
 
         # 读取配置文件以确定输出目录
-        config = configparser.ConfigParser()
-        config.read('config.ini', encoding='utf-8')
-        custom_output_path = config.get('General', 'report_output_path', fallback=None)
+        self.config.read('config.ini', encoding='utf-8')
+        custom_output_path = self.config.get('General', 'report_output_path', fallback=None)
         
         if custom_output_path and os.path.isdir(custom_output_path):
             self.output_dir = custom_output_path
@@ -83,24 +86,57 @@ class ReportGenerator:
             self._log(f"LLM结果目录不存在: {self.llm_result_dir}")
             return None
         
-        # 遍历LLM分析结果文件并添加到文档
+        enriched_chapters = enrich_chapters(chapters)
+        leaf_chapters = [chapter for chapter in enriched_chapters if chapter.get("is_leaf")]
         chapter_files = sorted([f for f in os.listdir(self.llm_result_dir) if f.endswith('_analysis.md')])
-        
-        if not chapter_files:
+
+        if not chapter_files or not leaf_chapters:
             self._log("未找到任何LLM分析结果文件，无法生成报告。")
             return None
 
-        for chapter_file in chapter_files:
-            file_path = os.path.join(self.llm_result_dir, chapter_file)
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                self._add_markdown_content_to_document(content)
-                self.document.add_page_break() # 每个章节后添加分页符
-                self._log(f"已添加章节分析: {chapter_file}")
-            except Exception as e:
-                self._log(f"读取或添加文件 '{chapter_file}' 失败: {e}")
+        leaf_analysis_map = self._load_leaf_analysis_map(leaf_chapters)
+        enable_parent_summary_analysis = self.config.getboolean(
+            'LLM', 'enable_parent_summary_analysis', fallback=True
+        )
+        parent_analysis_map = (
+            self._load_parent_analysis_map(enriched_chapters)
+            if enable_parent_summary_analysis else {}
+        )
+        leaf_chapter_keys = {self._chapter_key(chapter) for chapter in leaf_chapters}
+        first_top_level = True
+
+        for chapter in enriched_chapters:
+            level = max(1, int(chapter.get("level", 1)))
+            heading_text = chapter.get("title", "未命名章节")
+
+            if level == 1 and not first_top_level:
+                self.document.add_page_break()
+            if level == 1:
+                first_top_level = False
+
+            self.document.add_heading(heading_text, level=min(level, 4))
+
+            parent_analysis = parent_analysis_map.get(self._chapter_key(chapter))
+            if parent_analysis:
+                self._add_markdown_content_to_document(
+                    parent_analysis,
+                    skip_title_heading=True
+                )
+
+            if self._chapter_key(chapter) not in leaf_chapter_keys:
                 continue
+
+            analysis_content = leaf_analysis_map.get(self._chapter_key(chapter))
+            if not analysis_content:
+                self._log(f"警告: 未找到叶子章节分析结果: {heading_text}")
+                self.document.add_paragraph("未找到对应的 LLM 分析结果。")
+                continue
+
+            self._add_markdown_content_to_document(
+                analysis_content,
+                skip_title_heading=True
+            )
+            self._log(f"已添加切片分析: {heading_text}")
 
         output_filename = f"{book_title}_Report.docx"
         output_path = os.path.join(self.output_dir, output_filename)
@@ -113,13 +149,56 @@ class ReportGenerator:
             self._log(f"保存Word报告失败: {e}")
             return None
 
-    def _add_markdown_content_to_document(self, markdown_content: str):
+    def _chapter_key(self, chapter: Dict) -> tuple:
+        return (
+            int(chapter.get("level", 1)),
+            chapter.get("title", ""),
+            int(chapter.get("start_page", 0)),
+            int(chapter.get("end_page", 0)),
+        )
+
+    def _load_leaf_analysis_map(self, leaf_chapters: List[Dict]) -> Dict[tuple, str]:
+        analysis_map = {}
+        for i, chapter in enumerate(leaf_chapters):
+            chapter_file = f"{i+1:02d}_analysis.md"
+            file_path = os.path.join(self.llm_result_dir, chapter_file)
+            if not os.path.exists(file_path):
+                self._log(f"警告: 分析结果文件不存在: {chapter_file}")
+                continue
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    analysis_map[self._chapter_key(chapter)] = f.read()
+            except Exception as e:
+                self._log(f"读取分析结果文件 '{chapter_file}' 失败: {e}")
+        return analysis_map
+
+    def _load_parent_analysis_map(self, chapters: List[Dict]) -> Dict[tuple, str]:
+        analysis_map = {}
+        for chapter in chapters:
+            if chapter.get("is_leaf"):
+                continue
+            chapter_file = (
+                f"{PARENT_CHAPTER_ANALYSIS_PREFIX}"
+                f"{chapter.get('_source_index', 0) + 1:02d}_analysis.md"
+            )
+            file_path = os.path.join(self.llm_result_dir, chapter_file)
+            if not os.path.exists(file_path):
+                continue
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    analysis_map[self._chapter_key(chapter)] = f.read()
+            except Exception as e:
+                self._log(f"读取分析结果文件 '{chapter_file}' 失败: {e}")
+        return analysis_map
+
+    def _add_markdown_content_to_document(self, markdown_content: str, skip_title_heading: bool = False):
         """
         将Markdown内容解析并添加到Word文档中。
         这是一个简化的Markdown解析，处理标题、段落、粗体文本、分隔线等。
         """
         lines = markdown_content.split('\n')
         i = 0
+        title_skipped = not skip_title_heading
         while i < len(lines):
             line = lines[i].strip()
             
@@ -128,6 +207,10 @@ class ReportGenerator:
                 continue
 
             if line.startswith('#'):
+                if skip_title_heading and not title_skipped:
+                    title_skipped = True
+                    i += 1
+                    continue
                 # 标题处理
                 level = 0
                 for char in line:

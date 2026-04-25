@@ -381,6 +381,11 @@ class SettingsDialog(QDialog):
         self.max_concurrent_llm_calls.setRange(1, 20) # Set a reasonable range for concurrency
         self.max_concurrent_llm_calls.setValue(5) # Default value
         params_layout.addRow("最大并发请求数:", self.max_concurrent_llm_calls)
+
+        self.enable_parent_summary_analysis = QCheckBox("启用上级章节总结分析")
+        self.enable_parent_summary_analysis.setChecked(True)
+        self.enable_parent_summary_analysis.setToolTip("开启后，会对 L1/L2 等父级章节拼接下级内容后再做补充分析")
+        params_layout.addRow("父级补充分析:", self.enable_parent_summary_analysis)
         
         layout.addWidget(params_group)
         
@@ -518,6 +523,9 @@ class SettingsDialog(QDialog):
             if prompt:
                 self.system_prompt.setPlainText(prompt)
             self.max_concurrent_llm_calls.setValue(llm_section.getint('max_concurrent_llm_calls', 5))
+            self.enable_parent_summary_analysis.setChecked(
+                llm_section.getboolean('enable_parent_summary_analysis', True)
+            )
     
     def save_settings(self):
         """保存设置到配置文件（保存后不关闭窗口）"""
@@ -547,6 +555,7 @@ class SettingsDialog(QDialog):
         llm_section['max_tokens'] = str(self.max_tokens.value())
         llm_section['prompt'] = self.system_prompt.toPlainText()
         llm_section['max_concurrent_llm_calls'] = str(self.max_concurrent_llm_calls.value())
+        llm_section['enable_parent_summary_analysis'] = str(self.enable_parent_summary_analysis.isChecked())
 
         # API Key 单独保存到 keys.ini（不写入 config.ini）
         for section in ['MinerU', 'LLM']:

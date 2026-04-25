@@ -2,6 +2,40 @@ from pypdf import PdfReader, PdfWriter
 import os
 
 
+def enrich_chapters(chapters: list) -> list:
+    """
+    为章节列表补充层级路径、父子关系与叶子节点信息。
+    返回的新列表保留原顺序，不修改原始输入。
+    """
+    enriched = []
+    stack = []
+
+    for i, chapter in enumerate(chapters):
+        chapter_copy = dict(chapter)
+        level = chapter_copy.get("level", 1)
+
+        while stack and stack[-1].get("level", 1) >= level:
+            stack.pop()
+
+        parent = stack[-1] if stack else None
+        path_titles = [node.get("title", "") for node in stack] + [chapter_copy.get("title", "")]
+
+        chapter_copy["path_titles"] = path_titles
+        chapter_copy["display_title"] = " > ".join(filter(None, path_titles))
+        chapter_copy["parent_index"] = parent.get("_source_index") if parent else None
+        chapter_copy["_source_index"] = i
+
+        enriched.append(chapter_copy)
+        stack.append(chapter_copy)
+
+    for i, chapter in enumerate(enriched):
+        level = chapter.get("level", 1)
+        next_level = enriched[i + 1].get("level", 1) if i + 1 < len(enriched) else 0
+        chapter["is_leaf"] = next_level <= level
+
+    return enriched
+
+
 def get_bookmarks(pdf_path: str, max_level: int = 3) -> list:
     """
     从 PDF 文件中提取书签（大纲），支持最多 max_level 级层次。
@@ -58,13 +92,12 @@ def get_leaf_chapters(chapters: list) -> list:
     判断规则：若下一条目的 level <= 本条目的 level，则本条目为叶子节点。
     若章节列表不含层级信息（旧数据 level 均默认为 1），全部视为叶子节点（向后兼容）。
     """
-    leaf = []
-    for i, chapter in enumerate(chapters):
-        level = chapter.get("level", 1)
-        next_level = chapters[i + 1].get("level", 1) if i + 1 < len(chapters) else 0
-        if next_level <= level:
-            leaf.append(chapter)
-    return leaf
+    return [chapter for chapter in enrich_chapters(chapters) if chapter.get("is_leaf")]
+
+
+def get_non_leaf_chapters(chapters: list) -> list:
+    """返回所有非叶子章节。"""
+    return [chapter for chapter in enrich_chapters(chapters) if not chapter.get("is_leaf")]
 
 
 def split_pdf_by_chapters(original_pdf_path: str, chapters: list, output_dir: str):
